@@ -15,7 +15,10 @@ export type TokenStandard = 'erc721' | 'erc1155' | 'unknown'
 /** Identifies one NFT on one chain. */
 export interface TokenRef {
   chainId: number
-  /** Checksummed 0x address. */
+  /**
+   * 0x address. Produced lowercase throughout — nothing here computes an
+   * EIP-55 checksum — so every comparison against it must be case-insensitive.
+   */
   contract: string
   /** Decimal string — token IDs exceed Number.MAX_SAFE_INTEGER. */
   tokenId: string

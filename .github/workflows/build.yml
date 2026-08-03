@@ -1,0 +1,194 @@
+name: build
+
+# Two things happen here.
+#
+#   check    — runs on every push and every pull request. Typecheck, the OFFLINE
+#              test suite, and a full electron-vite build.
+#   package  — runs only for a v* tag. Builds the macOS .dmg and the Windows NSIS
+#              installer, one job per OS.
+#   publish  — collects both and attaches them to a draft GitHub release.
+#
+# NOTE ON TESTS: `npm run test` is the offline suite and is the only suite CI may
+# run. `npm run test:live` hits Ethereum mainnet RPC endpoints, public IPFS
+# gateways and the delegated routing service. It is slow, it is rate-limited, and
+# it fails for reasons that have nothing to do with the commit under test. Run it
+# by hand before cutting a release. Do not add it here.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck, test, build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        # Both projects: tsconfig.node.json (main + preload) and
+        # tsconfig.web.json (renderer).
+        run: npm run typecheck
+
+      - name: Test (offline suite only)
+        # `npm run test` uses vitest.config.ts, which includes only
+        # `test/*.test.ts`, excludes `test/live/**`, and loads
+        # `test/setup/no-network.ts` — a setup file that replaces global fetch
+        # with a stub that throws. So "CI never touches the network" is enforced
+        # by the config, not by convention: a test that quietly starts depending
+        # on a gateway fails loudly here instead of turning the suite into a
+        # weather report.
+        #
+        # No --passWithNoTests. If the include glob or the test directory ever
+        # breaks, this job must go red rather than green-with-zero-tests.
+        run: npm run test
+
+      - name: Build
+        # electron-vite build → out/main (ESM), out/preload (CJS), out/renderer.
+        # The renderer isolation plugin fails this step by name if a Node builtin,
+        # `electron`, an IPFS package or anything under src/main/ reaches the
+        # window bundle.
+        run: npm run build
+
+  # Build the installers. One job per operating system, in parallel. These jobs
+  # produce files and nothing else — they never touch the GitHub release, so
+  # there is no race between them to get wrong.
+  package:
+    name: ${{ matrix.label }}
+    # Only for tags like v0.2.0, and only if `check` went green.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (dmg)
+            script: dist:mac
+            # The runner is Apple silicon, so ask for the Intel slice too —
+            # otherwise every member on an older Mac is left without a build.
+            builderArgs: --arm64 --x64
+            artifacts: release/*.dmg
+          - os: windows-latest
+            label: Windows (nsis)
+            script: dist:win
+            builderArgs: --x64
+            artifacts: release/*.exe
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Package with electron-builder
+        # NO CODE-SIGNING SECRETS ARE CONFIGURED, DELIBERATELY — a DAO should not
+        # be holding an Apple or Authenticode signing key in CI.
+        #
+        # Consequence: these builds are unsigned, and both operating systems will
+        # warn the first time a member opens the app.
+        #
+        #   macOS   — "cannot be opened because it is from an unidentified
+        #             developer". The way past it is System Settings → Privacy &
+        #             Security → scroll to the message about BIC Archiver →
+        #             "Open Anyway", then confirm. It is asked once, ever.
+        #             (Right-click → Open no longer works for quarantined apps on
+        #             recent macOS; Privacy & Security is the reliable route.)
+        #   Windows — SmartScreen's "Windows protected your PC" → More info →
+        #             Run anyway.
+        #
+        # This is written out for members in docs/FOR-MEMBERS.md, step 2. If the
+        # DAO ever buys certificates, electron-builder reads them from secrets
+        # with no change to these scripts.
+        #
+        # CSC_IDENTITY_AUTO_DISCOVERY=false stops electron-builder from hunting
+        # the runner's keychain for an identity it will not find.
+        #
+        # `--publish never` and the absence of GH_TOKEN here are deliberate:
+        # electron-builder publishes by itself when it sees a token on a tag
+        # build, which would race the explicit upload steps below and could
+        # produce a non-draft release. Packaging and publishing stay separate.
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run ${{ matrix.script }} -- ${{ matrix.builderArgs }} --publish never
+
+      - name: Hand the installer to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ runner.os }}
+          path: ${{ matrix.artifacts }}
+          # A silently empty release is worse than a failed build.
+          if-no-files-found: error
+          retention-days: 14
+
+  # Collect both installers and attach them to one release. Deliberately a single
+  # job: two jobs creating a release for the same tag can each succeed and leave
+  # two drafts behind, because GitHub does not enforce tag uniqueness on drafts.
+  publish:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # to create the draft release and upload the installers
+
+    steps:
+      - name: Collect the installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: installers
+          merge-multiple: true
+
+      - name: Create the draft release and attach them
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # gh needs to know which repository it is talking to; there is no
+          # checkout in this job because nothing here needs the source.
+          GH_REPO: ${{ github.repository }}
+        # A DRAFT on purpose: these builds are unsigned, so a human downloads
+        # both, opens each one on a real machine, and only then presses Publish.
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          ls -la installers
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --draft --generate-notes
+          fi
+
+          gh release upload "$tag" installers/* --clobber
+
+          echo "Draft release $tag is ready. Test both installers, then publish it."

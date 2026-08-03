@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
+    "test:lifecycle": "electron-vite build && electron scripts/lifecycle-probe.mjs",
     "dist:mac": "electron-vite build && electron-builder --mac",
     "dist:win": "electron-vite build && electron-builder --win",
     "dist:linux": "electron-vite build && electron-builder --linux"
@@ -22,6 +23,7 @@
     "@ipld/dag-pb": "^4.1.7",
     "blockstore-core": "^7.0.1",
     "blockstore-fs": "^4.0.1",
+    "interface-blockstore": "^7.0.1",
     "ipfs-unixfs": "^12.0.1",
     "ipfs-unixfs-exporter": "^16.0.2",
     "ipfs-unixfs-importer": "^17.0.1",
