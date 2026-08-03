@@ -14,6 +14,8 @@
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
     "test:lifecycle": "electron-vite build && electron scripts/lifecycle-probe.mjs",
+    "build:lib": "esbuild scripts/lib-entry.ts --bundle --platform=node --format=esm --packages=external --outfile=out-lib/index.js",
+    "inspect": "npm run build:lib --silent && node scripts/inspect-car.mjs",
     "dist:mac": "electron-vite build && electron-builder --mac",
     "dist:win": "electron-vite build && electron-builder --win",
     "dist:linux": "electron-vite build && electron-builder --linux"

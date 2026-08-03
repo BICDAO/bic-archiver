@@ -19,6 +19,7 @@
     "test/**/*",
     "electron.vite.config.ts",
     "vitest.config.ts",
-    "vitest.live.config.ts"
+    "vitest.live.config.ts",
+    "scripts/**/*.ts"
   ]
 }

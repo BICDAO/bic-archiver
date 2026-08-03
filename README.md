@@ -245,3 +245,23 @@ them up from secrets without any change to the build scripts.
 - **A browsable folder export is not a backup.** It writes ordinary files, which
   throws away the attributes needed to reproduce the original hashes. The `.car` is
   the backup; the folder is for looking at.
+
+## Inspecting a `.car` from the command line
+
+BIC keeps its master backups as `.car` files in Google Drive rather than relying
+on the IPFS network to hold them. That keeps the bytes safe but says nothing
+about whether any content ID inside is still being *served* — and those are
+different properties. To find out:
+
+```bash
+npm run inspect -- /path/to/BIC-backup.car
+```
+
+It verifies every block's hash as it reads, lists what is inside, then checks
+each content ID against the public network and reports what is online, what is
+at risk, and what now exists only inside that file. Add `--no-health` to skip
+the network pass, or `--json report.json` to keep a machine-readable copy.
+
+Runs on plain Node — no Electron, no window — via a small library bundle
+(`npm run build:lib`) so it shares the app's code paths rather than
+reimplementing them.
