@@ -35,12 +35,15 @@ import { ProgressList } from './ProgressList'
 /* -------------------------------------------------------------------------- */
 
 /**
- * The DAO's own October 2025 backup. Every gateway returns 504 for it and
- * delegated routing reports no providers at all: the content is gone. It is the
- * example here on purpose — it is exactly the loss members are trying not to
- * repeat.
+ * The DAO's October 2025 backup. Every gateway returns 504 for it and delegated
+ * routing reports no providers, so pasting it here cannot work.
+ *
+ * The content itself is *not* lost: as of May 2026 the DAO keeps its backups as
+ * `.car` files in Google Drive rather than relying on the IPFS network to hold
+ * them. So this ID is shown as a caution, not as something to try — the working
+ * route is Export ▸ "Read a backup someone sent you" with the `.car` from Drive.
  */
-const DEAD_BACKUP_CID = 'bafybeidgu3wl7p6lggejzxcvzcbnwrbcatbgktcvk6aqfe3ficuhxwilym'
+const OCT_2025_CID = 'bafybeidgu3wl7p6lggejzxcvzcbnwrbcatbgktcvk6aqfe3ficuhxwilym'
 
 /** Matches the engine's own limit, so a member hears about it before waiting. */
 const MAX_TOKENS_PER_RUN = 1000
@@ -469,27 +472,20 @@ export function AddTokensView(props: AddTokensViewProps): JSX.Element {
           </p>
         </div>
 
-        <Banner
-          tone="warn"
-          title="The DAO's October 2025 backup appears to be gone"
-          actions={
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => {
-                setMergeText(DEAD_BACKUP_CID)
-              }}
-            >
-              Put that ID in the box
-            </button>
-          }
-        >
+        <Banner tone="warn" title="Older BIC content IDs will not work here">
           <>
-            The example below, <Cid cid={DEAD_BACKUP_CID} label="that backup's content ID" />, is
-            the DAO&rsquo;s own backup from October 2025. No computer on the IPFS network is
-            offering it and no public gateway will serve it, so adding it is expected to fail after
-            a minute or two of trying. That is exactly the loss this archiver exists to prevent
-            happening again — check first, rather than wait.
+            The DAO&rsquo;s October 2025 backup,{' '}
+            <Cid cid={OCT_2025_CID} label="that backup's content ID" />, is no longer on the IPFS
+            network — no computer is offering it and no public gateway will serve it — so pasting
+            it here just fails after a minute or two of trying.
+            <br />
+            <br />
+            <strong>The files themselves are safe.</strong> Since May 2026 the DAO keeps its
+            backups as <code>.car</code> files in Google Drive instead of relying on the network to
+            hold them. To fold an older backup in, download the newest <code>.car</code> from that
+            folder, then go to <strong>Export</strong> ▸ <strong>Restore from a backup</strong> ▸{' '}
+            <strong>Choose a .car file…</strong>. Content IDs are only worth pasting here when
+            somebody is actively keeping that content online.
           </>
         </Banner>
 
@@ -505,7 +501,7 @@ export function AddTokensView(props: AddTokensViewProps): JSX.Element {
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
-            placeholder={DEAD_BACKUP_CID}
+            placeholder={OCT_2025_CID}
             aria-invalid={mergeInput.error !== null ? true : undefined}
             onChange={(event) => {
               setMergeText(event.target.value)

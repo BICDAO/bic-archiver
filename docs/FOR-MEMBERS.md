@@ -40,6 +40,14 @@ already downloaded that file, you may be holding one of the last copies in exist
 someone might still have it on an old laptop. This is the one word in the app worth
 interrupting your evening for.
 
+**Unreachable does not always mean lost.** BIC keeps its master backups as `.car`
+files in a Google Drive folder rather than trusting the IPFS network to hold them, so
+older BIC content IDs read as unreachable even though the files are perfectly safe.
+It means nobody is *serving* that content right now. If you need an older backup, get
+the newest `.car` from that Drive folder and use **Export ▸ Restore from a backup**
+— don't paste the old content ID into **Add NFTs**, because there is nothing online
+for the app to fetch.
+
 ---
 
 ## 1. Get the app

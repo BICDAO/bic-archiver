@@ -288,10 +288,29 @@ equivalent step.
 for live content and `{"Providers":[]}` for content that has fallen off the network.
 An empty provider list is the strongest available evidence that every copy is gone.
 
-**The DAO's own October 2025 backup is unreachable.**
+**The DAO's own October 2025 backup is unreachable — but the content is not lost.**
 `bafybeidgu3wl7p6lggejzxcvzcbnwrbcatbgktcvk6aqfe3ficuhxwilym` returns `504` from every
-gateway tried and has **zero providers announced**. This is not a hypothetical — it is
-the reason the app exists, and it is the case the failure paths are tuned against. The
+gateway tried and has **zero providers announced**. The CIDv0 form
+(`QmVFMvY5nPaBtWwak98Xxs69QJWswucBH8rYokwKdFoB6i`) behaves identically, as it must —
+same multihash, same DHT key.
+
+The resolution, learned after the app was built: **the DAO stopped relying on the IPFS
+network to hold its backups.** As of May 2026 the maintainer keeps `.tar` and `.car`
+files in a Google Drive folder instead. So the unreachable CID reflects nobody pinning
+that content any more, not data loss — the `.car` in Drive still carries the block-level
+hash data needed to restore those exact CIDs to IPFS.
+
+Two things follow, and they shape the app:
+
+1. **`importCar` matters more than `mergeExisting`.** Restoring from a `.car` on disk is
+   the live path; merging an older backup by CID only works while somebody is actively
+   serving that CID. The Add-NFTs screen says so rather than inviting a doomed paste.
+2. **"Backed up" and "available" are different properties.** A `.car` in Drive protects
+   the bytes, but every CID in it stays unreachable on IPFS until someone re-adds and
+   pins it. Health checks report availability, so an archive can be perfectly safe and
+   still show every row red. That is not a bug, and the wording says so.
+
+This is still the case the failure paths are tuned against. The
 app warns within a few seconds (the routing lookup runs *concurrently* with the
 download attempt, so the member is not left staring at nothing for a minute) and fails
 with the full explanation at around 68 s, naming each gateway and what it said, and
