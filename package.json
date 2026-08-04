@@ -1,6 +1,6 @@
 {
   "name": "bic-archiver",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop app for archiving NFT metadata and media to verifiable IPFS .car backups",
   "main": "./out/main/index.js",
   "author": "BIC",
@@ -48,14 +48,32 @@
   "build": {
     "appId": "org.bic.archiver",
     "productName": "BIC Archiver",
-    "directories": { "output": "release" },
-    "files": ["out/**/*", "resources/**/*"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*"
+    ],
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.utilities",
       "icon": "resources/icon.icns"
     },
-    "win": { "target": ["nsis"], "icon": "resources/icon.png" },
-    "linux": { "target": ["AppImage"], "category": "Utility", "icon": "resources/icon.png" }
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "resources/icon.png"
+    }
   }
 }
