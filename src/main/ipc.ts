@@ -33,6 +33,7 @@ import type {
   MirrorProgress,
   MirrorResult
 } from '../shared/community'
+import type { DriftStatus, ManagedNodeStatus, NodeInstallProgress } from '../shared/node'
 import { DEFAULT_PINNING_SETTINGS } from '../shared/pinning'
 import type {
   AssetRow,
@@ -110,6 +111,7 @@ import { listPinnedCids } from './pinning/pinata'
 import {
   clearPinataToken,
   getPinataToken,
+  getSettingsStore,
   loadSettings,
   redactSecrets,
   saveSettings,
@@ -138,6 +140,38 @@ import {
   mirrorArchive,
   resolveArchiveRoot
 } from './community/mirror'
+
+/* ========================================================================== */
+/* NODE ENGINE BINDING                                                        */
+/* -------------------------------------------------------------------------- */
+/* The fourth engine: the member's own IPFS node, and the drift check that      */
+/* tells them whether what it is serving is still what BIC publishes.           */
+/*                                                                             */
+/* Nothing in this block reads the Pinata key, and none of it needs to. A node  */
+/* is this computer's own business, and `checkDrift` is handed the settings     */
+/* *store* rather than a credential — it reads one small note next to the       */
+/* settings file, plus DNS and the member's own node.                          */
+/*                                                                             */
+/* SECURITY — the one place this app downloads and then executes a binary.      */
+/* Every rule about that lives in `src/main/node/install.ts`: HTTPS from        */
+/* `KUBO_DIST` only, and the artifact's SHA-512 checked against its own sibling */
+/* checksum file before a single byte is unpacked or run, with a mismatch       */
+/* deleting the download instead of running it. This file adds nothing to that  */
+/* and must never be given a way to weaken it, which is why `node:install`      */
+/* takes no payload at all beyond an `opId`: there is no field here that can    */
+/* name a URL, a version, a mirror or a path on disk.                           */
+/* ========================================================================== */
+
+import { checkDrift, recordMirrored } from './community/drift'
+import { disableAutostart, enableAutostart } from './node/autostart'
+import {
+  getNodeStatus,
+  installAndStart,
+  nodePaths,
+  startNode,
+  stopNode,
+  uninstallNode
+} from './node/manager'
 
 /* ========================================================================== */
 /* Tunables                                                                   */
@@ -722,6 +756,115 @@ class MirrorProgressPump {
   }
 }
 
+/** The phases setting a node up is allowed to report; anything else is a bug. */
+const NODE_PHASES: ReadonlySet<string> = new Set<NodeInstallProgress['phase']>([
+  'checking',
+  'downloading',
+  'verifying',
+  'extracting',
+  'initialising',
+  'configuring',
+  'starting',
+  'autostart',
+  'done',
+  'error'
+])
+
+function cleanNodeProgress(progress: NodeInstallProgress): NodeInstallProgress {
+  const cleaned: NodeInstallProgress = {
+    // An unrecognised phase becomes 'checking' rather than being dropped, for
+    // the same reason as the mirror's: the message still says something useful,
+    // and a phase the GUI cannot draw would leave it stuck. 'checking' is the
+    // neutral one — it claims nothing about how far along the install is.
+    phase: NODE_PHASES.has(progress.phase) ? progress.phase : 'checking',
+    // Redacted like every other stream that reaches a screen. Setting a node up
+    // never touches the Pinata key, but these messages do quote the operating
+    // system and the node's own log, so this stays on principle.
+    message: typeof progress.message === 'string' ? redactSecrets(progress.message) : ''
+  }
+  if (typeof progress.progress === 'number' && Number.isFinite(progress.progress)) {
+    cleaned.progress = Math.min(1, Math.max(0, progress.progress))
+  }
+  if (typeof progress.bytesDone === 'number' && Number.isFinite(progress.bytesDone)) {
+    cleaned.bytesDone = Math.max(0, Math.round(progress.bytesDone))
+  }
+  if (typeof progress.bytesTotal === 'number' && Number.isFinite(progress.bytesTotal)) {
+    cleaned.bytesTotal = Math.max(0, Math.round(progress.bytesTotal))
+  }
+  return cleaned
+}
+
+/**
+ * The `node-progress` equivalent of {@link ProgressPump}.
+ *
+ * Same single-slot design as {@link MirrorProgressPump}: setting a node up is
+ * one job with one story, so a newer message simply replaces the one that has
+ * not gone out yet. `done` and `error` are never held back.
+ *
+ * This one matters more than most. The download is ~80 MB and the member is
+ * watching a computer do something they were told they would never have to do
+ * by hand — a bar that stops moving is a member who force-quits mid-install.
+ */
+class NodeProgressPump {
+  private pending: NodeInstallProgress | null = null
+  private lastSentAt = 0
+  private timer: NodeJS.Timeout | null = null
+  private disposed = false
+
+  constructor(private readonly sender: WebContents) {}
+
+  readonly push = (progress: NodeInstallProgress): void => {
+    if (this.disposed) return
+    const cleaned = cleanNodeProgress(progress)
+    const terminal = cleaned.phase === 'done' || cleaned.phase === 'error'
+    const now = Date.now()
+
+    if (terminal || now - this.lastSentAt >= MIN_PROGRESS_INTERVAL_MS) {
+      this.pending = null
+      this.lastSentAt = now
+      this.emit(cleaned)
+      return
+    }
+
+    this.pending = cleaned
+    if (this.timer === null) {
+      this.timer = setTimeout(() => {
+        this.timer = null
+        this.flush()
+      }, MIN_PROGRESS_INTERVAL_MS)
+      this.timer.unref?.()
+    }
+  }
+
+  flush(): void {
+    const queued = this.pending
+    if (queued === null) return
+    this.pending = null
+    this.lastSentAt = Date.now()
+    this.emit(queued)
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.flush()
+    this.disposed = true
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.pending = null
+  }
+
+  private emit(progress: NodeInstallProgress): void {
+    if (this.sender.isDestroyed()) return
+    try {
+      this.sender.send('node-progress', progress)
+    } catch (err) {
+      console.error('[bic-archiver] could not deliver a set-up update', err)
+    }
+  }
+}
+
 /* ========================================================================== */
 /* Operations + cancellation                                                  */
 /* ========================================================================== */
@@ -865,6 +1008,36 @@ async function runMirrorOperation<T>(
     label,
     async (ctx) => {
       const pump = new MirrorProgressPump(event.sender)
+      try {
+        return await body(ctx, pump.push)
+      } finally {
+        pump.dispose()
+      }
+    },
+    cancelMessage
+  )
+}
+
+/**
+ * {@link runOperation} for setting a node up, which streams `node-progress`.
+ *
+ * Same shape as {@link runMirrorOperation}, and opened around the body only, so
+ * nothing else ever sends on that channel and a cancelled install still flushes
+ * the last thing it had to say.
+ */
+async function runNodeOperation<T>(
+  event: IpcMainInvokeEvent,
+  rawOpId: unknown,
+  label: string,
+  body: (ctx: RunContext, onNodeProgress: (progress: NodeInstallProgress) => void) => Promise<T>,
+  cancelMessage?: string
+): Promise<T> {
+  return runOperation(
+    event,
+    rawOpId,
+    label,
+    async (ctx) => {
+      const pump = new NodeProgressPump(event.sender)
       try {
         return await body(ctx, pump.push)
       } finally {
@@ -1103,6 +1276,49 @@ async function closeCurrentStore(): Promise<void> {
 }
 
 /* ========================================================================== */
+/* The member's own IPFS node                                                 */
+/* ========================================================================== */
+
+/**
+ * Non-null while a job that changes the node is in flight.
+ *
+ * The same reasoning as {@link withArchiveLock}, over a different resource, and
+ * with a sharper edge: an uninstall deletes the very binary an install is
+ * writing, and two installs at once would unpack over each other. Rather than
+ * queue silently — which looks like the app has hung, on the one screen where a
+ * member is already being asked to trust something they cannot see — the second
+ * one says what the first is doing.
+ *
+ * Reading the node's state is deliberately *not* behind this: a status panel
+ * must be able to draw itself while an install is running, which is the whole
+ * point of streaming the install's progress.
+ */
+let nodeBusy: string | null = null
+
+async function withNodeLock<T>(label: string, body: () => Promise<T>): Promise<T> {
+  if (nodeBusy !== null) {
+    throw plain(`The app is busy ${nodeBusy}. Wait for that to finish, or press Stop, then try again.`)
+  }
+  nodeBusy = label
+  try {
+    return await body()
+  } finally {
+    nodeBusy = null
+  }
+}
+
+/**
+ * Put a sentence in front of whatever the node engine already had to say.
+ *
+ * Used after a change the member explicitly asked for, so the answer leads with
+ * the thing they just did rather than with the node's general condition.
+ */
+function withNote(status: ManagedNodeStatus, note: string): ManagedNodeStatus {
+  const existing = typeof status.detail === 'string' ? status.detail.trim() : ''
+  return { ...status, detail: existing === '' ? note : `${note} ${existing}` }
+}
+
+/* ========================================================================== */
 /* Paths the member has actually chosen                                       */
 /* ========================================================================== */
 
@@ -1156,6 +1372,20 @@ function readOptionalString(payload: unknown, field: string): string | undefined
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   return trimmed === '' ? undefined : trimmed
+}
+
+/**
+ * A switch position the window is asking us to apply.
+ *
+ * Strict about the type on purpose: a missing or non-boolean field would
+ * otherwise read as "off", and silently turning a member's login item *off*
+ * when they meant to turn it on is exactly the class of quiet failure this app
+ * exists to end.
+ */
+function readBoolean(payload: unknown, field: string, complaint: string): boolean {
+  const value = asRecord(payload)[field]
+  if (typeof value !== 'boolean') throw plain(complaint)
+  return value
 }
 
 function readPath(payload: unknown, field: string, description: string): string {
@@ -2376,11 +2606,45 @@ export function registerIpcHandlers(): void {
           // is exactly the thing a member may want to look at or delete, and this
           // is the only way "show me where it saved" can reach it.
           approvePath(destDir)
+
+          // Write down what was copied, so `drift:check` can later say whether
+          // this member is still serving what BIC publishes without having to
+          // interrogate their node — which is the only way that question can be
+          // answered on a machine whose node is off.
+          //
+          // Only on a run that finished: a partial copy is not something to
+          // claim as mirrored. `recordMirrored` never throws and refuses a CID
+          // it cannot parse, so a note that could not be written can never turn
+          // a finished 1.8 GB copy into an error message.
+          if (result.ok) await recordMirrored(getSettingsStore(), result.rootCid)
+
           return result
         }),
       `${CANCELLED_MESSAGE} Everything downloaded before you stopped has been kept, so starting again will carry on from there.`
     )
   })
+
+  /**
+   * Has BIC published a newer archive than the one this member is serving?
+   *
+   * The published root moves whenever the archive is updated — it is a DNSLink
+   * record, not a constant — so a member who mirrored last month is quietly
+   * serving a stale copy, and, exactly like the problem this app was built for,
+   * nothing tells them. This is the thing that tells them.
+   *
+   * Reads no credential: the check is DNS, this computer's own node, and one
+   * small note next to the settings file. It never throws for a failure either —
+   * an offline member gets `unknown`, which says the check could not run rather
+   * than claiming their copy is stale.
+   */
+  handle<DriftStatus>(
+    'drift:check',
+    'checking whether your copy of the BIC archive is up to date',
+    async (event, payload) =>
+      runOperation(event, asRecord(payload)['opId'], 'checking for a newer archive', async (ctx) =>
+        checkDrift(await loadSettings(), getSettingsStore(), ctx.signal)
+      )
+  )
 
   /* ---------------------------------------------------------------------- */
   /* The shared BIC archive: gallery                                        */
@@ -2429,6 +2693,163 @@ export function registerIpcHandlers(): void {
       return merged ?? match
     })
   })
+
+  /* ---------------------------------------------------------------------- */
+  /* The member's own IPFS node                                             */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * What is on this computer: our node, somebody else's, or nothing yet.
+   *
+   * Read-only, cheap, and never fails because a node is missing or not
+   * answering — that *is* the answer, and it comes back in `state` and a plain
+   * `detail`. Deliberately outside {@link withNodeLock} so a status panel can
+   * keep drawing itself while an install runs.
+   */
+  handle<ManagedNodeStatus>('node:status', 'checking your IPFS node', async (event, payload) =>
+    runOperation(event, asRecord(payload)['opId'], 'checking your IPFS node', async (ctx) =>
+      getNodeStatus(await loadSettings(), ctx.signal)
+    )
+  )
+
+  /**
+   * The one button behind the whole plan: get this computer serving the archive.
+   *
+   * Downloads Kubo, checks its SHA-512, unpacks it, initialises and configures a
+   * repository, clears any leftover lock, starts the daemon and sets it to come
+   * back at login. Streams `node-progress` throughout, because it is an ~80 MB
+   * download followed by several minutes of work and the member has been
+   * promised they will never have to open a terminal.
+   *
+   * Takes no payload but an `opId`. That is the security property, not an
+   * oversight: nothing the window can send names a download URL, a version, a
+   * mirror or a path, so no renderer bug and no injected string can redirect
+   * what gets executed. Where the bytes come from and how they are verified is
+   * fixed in `KUBO_DIST` and `src/main/node/install.ts`.
+   *
+   * Idempotent. A member who already runs their own node has nothing installed
+   * at all — theirs already does the job, and taking it over is not ours to do.
+   */
+  handle<ManagedNodeStatus>('node:install', 'setting up your IPFS node', async (event, payload) =>
+    withNodeLock('setting up your IPFS node', async () =>
+      runNodeOperation(
+        event,
+        asRecord(payload)['opId'],
+        'setting up your IPFS node',
+        async (ctx, onNodeProgress) => installAndStart(onNodeProgress, ctx.signal),
+        // A half-finished set-up is resumable rather than wasted, and a member
+        // who stopped one should be told that before they wonder whether they
+        // have left something broken behind.
+        `${CANCELLED_MESSAGE} Nothing was left running, and setting it up again will pick up where it left off.`
+      )
+    )
+  )
+
+  /**
+   * Start a node this app installed.
+   *
+   * Clears a stale `repo.lock` first. That single leftover file — what a hard
+   * shutdown leaves behind — silently blocks every start and logs nothing, which
+   * is precisely the kind of invisible failure a non-technical member has no way
+   * to diagnose.
+   */
+  handle<ManagedNodeStatus>('node:start', 'starting your IPFS node', async (event, payload) =>
+    withNodeLock('starting your IPFS node', async () =>
+      runOperation(event, asRecord(payload)['opId'], 'starting your IPFS node', async (ctx) =>
+        startNode(ctx.signal)
+      )
+    )
+  )
+
+  /**
+   * Stop a node this app installed.
+   *
+   * Refuses to touch one it did not: a node the member set up themselves, or
+   * that came with Homebrew or IPFS Desktop, is theirs to control.
+   */
+  handle<ManagedNodeStatus>('node:stop', 'stopping your IPFS node', async (event, payload) =>
+    withNodeLock('stopping your IPFS node', async () =>
+      runOperation(event, asRecord(payload)['opId'], 'stopping your IPFS node', async (ctx) =>
+        stopNode(ctx.signal)
+      )
+    )
+  )
+
+  /**
+   * Remove the node this app installed.
+   *
+   * The member's copy of the archive is kept. That is the engine's default and
+   * this channel deliberately offers no way to override it: "remove the program"
+   * and "delete 1.9 GB of rescued NFTs" are different requests, and the second
+   * one is not something to expose behind a button the first one shares.
+   */
+  handle<ManagedNodeStatus>('node:uninstall', 'removing your IPFS node', async (event, payload) =>
+    withNodeLock('removing your IPFS node', async () =>
+      runOperation(event, asRecord(payload)['opId'], 'removing your IPFS node', async (ctx) =>
+        uninstallNode({ signal: ctx.signal })
+      )
+    )
+  )
+
+  /**
+   * Whether the node comes back when the member logs in.
+   *
+   * This is the setting that decides whether the DAO has ten providers or ten
+   * people who happened to have the app open. A node that does not survive a
+   * reboot serves the archive until the first time someone shuts their laptop.
+   *
+   * Switching it *off* is allowed even with no node installed, because that is
+   * how a login item left behind by a removed node gets cleaned up. Switching it
+   * *on* needs a node to point at.
+   */
+  handle<ManagedNodeStatus>(
+    'node:setAutostart',
+    'changing when your IPFS node starts',
+    async (event, payload) => {
+      const enabled = readBoolean(
+        payload,
+        'enabled',
+        'This app could not tell whether you were switching that on or off, so nothing was changed. Try the switch again.'
+      )
+
+      return withNodeLock('changing when your IPFS node starts', async () =>
+        runOperation(event, asRecord(payload)['opId'], 'changing when your node starts', async (ctx) => {
+          const status = await getNodeStatus(await loadSettings(), ctx.signal)
+
+          if (status.state === 'external') {
+            throw plain(
+              'That IPFS node was not set up by this app, so this app does not control when it starts. ' +
+                'Whatever you used to install it — Homebrew, IPFS Desktop, or your own set-up — is what decides that.'
+            )
+          }
+
+          if (enabled) {
+            if (status.state === 'not-installed' || status.state === 'error') {
+              throw plain(
+                'There is no IPFS node on this computer yet, so there is nothing to start when you log in. ' +
+                  'Set one up first — the app does the whole thing for you.'
+              )
+            }
+            const paths = nodePaths()
+            await enableAutostart(paths.binPath, paths.repoPath)
+          } else {
+            await disableAutostart()
+          }
+
+          ctx.throwIfCancelled()
+          // Read back rather than assume: `autostart` in the answer is what the
+          // operating system actually reports, not what we just asked it for.
+          const next = await getNodeStatus(await loadSettings(), ctx.signal)
+          return withNote(
+            next,
+            enabled
+              ? 'Your IPFS node will now start on its own when you log in, so this computer keeps serving the archive without you having to remember.'
+              : 'Your IPFS node will no longer start when you log in. It keeps running until you stop it or restart this computer, and after that nothing here will be serving the archive.'
+          )
+        })
+      )
+    }
+  )
 
   /* ---------------------------------------------------------------------- */
   /* Native pickers                                                         */

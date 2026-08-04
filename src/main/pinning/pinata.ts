@@ -1036,8 +1036,52 @@ function describeNetworkError(err: unknown): string {
   return 'the connection failed'
 }
 
+/**
+ * Is this refusal about the member's *plan* rather than their key?
+ *
+ * The distinction is worth a function of its own, because getting it wrong
+ * costs a member an afternoon. Verified live: a free Pinata account asked to
+ * pin by CID answers `403` with `PAID_FEATURE_ONLY: You must be on a paid plan
+ * to pin by CID`. Read as an ordinary 403 that is indistinguishable from a
+ * key with the wrong permissions — so the member is told to check their key's
+ * permissions and save it again, which sends them off to rebuild the one thing
+ * that was never at fault. No key they can create on a free account will work,
+ * because the feature is not theirs to have.
+ *
+ * Matched on the body rather than the status, since a plan limit is a fact
+ * about the account and Pinata is free to report it under a different code.
+ */
+function isPlanLimitation(reason: string | undefined): reason is string {
+  if (reason === undefined || reason === '') {
+    return false
+  }
+  return /PAID[_\s-]?FEATURE|paid (?:plan|account|subscription|tier)|upgrade your (?:plan|account)|not (?:available|included) on (?:the )?free/i.test(
+    reason
+  )
+}
+
+/**
+ * What to say when Pinata's answer is "your plan does not include this".
+ *
+ * Three things a member needs, in order: that their key is fine, that no amount
+ * of fiddling with it will help, and that they do not actually need Pinata —
+ * their own node does the same job, for nothing, and this app can set it up.
+ * That last sentence is the whole reason this app grew a node manager.
+ */
+const PLAN_LIMITATION_MESSAGE =
+  'Pinata will not do this on a free account. Pinning by CID is a paid Pinata feature, and the free ' +
+  'tier cannot do it at all — so this is a limit of the plan, not a problem with your key. Making a new ' +
+  'key or changing its permissions will not help. You do not need Pinata for this: running your own IPFS ' +
+  'node keeps the archive alive just as well and costs nothing, and this app can set one up for you.'
+
 /** Plain English for a non-2xx status, with Pinata's own words appended. */
 function describeFailure(status: number, reason: string | undefined, what: string): string {
+  // Checked before the status, because "you are on the wrong plan" is a
+  // different problem from every code below and must not be dressed up as one.
+  if (isPlanLimitation(reason)) {
+    return `${PLAN_LIMITATION_MESSAGE} Pinata said: ${reason}`
+  }
+
   let headline: string
 
   switch (status) {
@@ -1048,6 +1092,9 @@ function describeFailure(status: number, reason: string | undefined, what: strin
       headline = 'That Pinata token was not accepted. Check you copied the whole JWT.'
       break
     case 403:
+      // A genuine permission problem. The "your plan does not include this"
+      // flavour of 403 never reaches here — it is answered above, because
+      // sending a member to rebuild their key would not have fixed it.
       headline =
         'Pinata refused this request (403). The key may not have permission to pin — check its ' +
         'permissions in your Pinata account, then save the token again.'

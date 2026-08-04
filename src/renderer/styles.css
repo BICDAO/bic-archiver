@@ -1824,6 +1824,948 @@ button.assets-stat:hover {
 }
 
 /* ========================================================================== */
+/* Disclosures                                                                */
+/* -------------------------------------------------------------------------- */
+/* A native `<details>`, because everything that makes a disclosure work — the */
+/* keyboard, the screen reader, and find-in-page opening a closed section when */
+/* a member searches for a word inside it — is free that way and fiddly any    */
+/* other way. Pinata in particular starts closed, and somebody looking for it  */
+/* with ⌘F must still land on it.                                             */
+/* ========================================================================== */
+
+.disclosure {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* Transparent, for a disclosure sitting inside a card that already has a
+   surface of its own — two nested grey boxes read as a rendering fault. */
+.disclosure--quiet {
+  background: none;
+}
+
+.disclosure__summary {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 11px 14px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease;
+}
+
+/* Chromium draws its own triangle unless both of these are said. */
+.disclosure__summary::marker,
+.disclosure__summary::-webkit-details-marker {
+  display: none;
+  content: '';
+}
+
+.disclosure__summary:hover {
+  background: var(--bg-hover);
+}
+
+.disclosure__caret {
+  flex: none;
+  width: 12px;
+  margin-top: 1px;
+  color: var(--text-faint);
+  text-align: center;
+  transition: transform 120ms ease;
+}
+
+.disclosure[open] > .disclosure__summary .disclosure__caret {
+  transform: rotate(90deg);
+}
+
+.disclosure__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.disclosure__title {
+  font-weight: 620;
+}
+
+.disclosure__note {
+  max-width: 68ch;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.disclosure__body {
+  padding: 14px;
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * A whole section that is deliberately secondary — today, Pinata. It carries no
+ * surface of its own: the disclosure inside is the entire visual, and its
+ * dashed edge is what says "optional" before a word is read.
+ */
+.card-secondary {
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+
+.card-secondary > .disclosure {
+  background: none;
+  border-style: dashed;
+}
+
+.card-secondary > .disclosure[open] {
+  background: var(--bg-elev);
+  border-style: solid;
+}
+
+/* ========================================================================== */
+/* The member's own IPFS node                                                 */
+/* -------------------------------------------------------------------------- */
+/* The primary block on the Settings screen. It replaced three shell commands  */
+/* and a hope, so it has to carry a lot: a state in plain words, a call to     */
+/* action, streamed progress through an ~80 MB download, the node's own facts, */
+/* and controls that appear only when they apply. Everything below is either   */
+/* the shared primitives or a container for them.                             */
+/* ========================================================================== */
+
+.node {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.node__head {
+  align-items: flex-start;
+}
+
+/*
+ * The one sentence that says where the member stands. Toned like a banner, but
+ * bigger and always present — this is the answer to the question they opened
+ * the screen with, not an interruption.
+ */
+.node__status {
+  padding: 14px 16px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.node__status-title {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.node__status-body {
+  max-width: 76ch;
+  margin-top: 3px;
+  color: var(--text-muted);
+}
+
+.node__status-detail {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+.node__status--ok {
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+  border-left-color: var(--ok);
+}
+
+.node__status--ok .node__status-title {
+  color: var(--ok);
+}
+
+.node__status--warn {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+  border-left-color: var(--warn);
+}
+
+.node__status--warn .node__status-title {
+  color: var(--warn);
+}
+
+.node__status--danger {
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+  border-left-color: var(--danger);
+}
+
+.node__status--danger .node__status-title {
+  color: var(--danger);
+}
+
+.node__status--info {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  border-left-color: var(--accent);
+}
+
+.node__status--info .node__status-title {
+  color: var(--accent);
+}
+
+.node__status--neutral {
+  border-left-color: var(--border-strong);
+}
+
+/* "Set up my node" — the single most consequential button in the app. */
+.node__cta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 18px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+}
+
+.node__cta-note {
+  max-width: 76ch;
+}
+
+.node__progress {
+  padding: 13px 15px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.node__facts {
+  gap: 8px 20px;
+  padding: 14px 16px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.node__path {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.node__relay {
+  max-width: 78ch;
+}
+
+/*
+ * Start, stop, autostart and remove. Ruled off from the facts above it because
+ * everything in here *changes* the node, while everything above merely reports
+ * on it — and "Remove the node program" is one click from a member who was
+ * reading. The rule is the only thing separating looking from doing.
+ */
+.node__controls {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* ========================================================================== */
+/* Help                                                                       */
+/* -------------------------------------------------------------------------- */
+/* A contents list beside the sections, because nobody reads a manual front to */
+/* back — they arrive with one question. The list is sticky so the way out of  */
+/* a section is always on screen, and each heading is focusable so following a */
+/* link moves the keyboard as well as the scroll position.                    */
+/* ========================================================================== */
+
+.help-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 236px) minmax(0, 1fr);
+  gap: 26px;
+  align-items: start;
+}
+
+.help-toc {
+  position: sticky;
+  top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.help-toc__label {
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.help-toc__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.help-toc__link {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  cursor: pointer;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease;
+}
+
+.help-toc__link:hover {
+  background: var(--bg-hover);
+}
+
+.help-toc__link[aria-current='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.help-toc__title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.help-toc__blurb {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.help-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+/*
+ * `scroll-margin-top` is what stops a heading landing flush against the top
+ * edge of the scroll area when its link is followed, which reads as the section
+ * having been cut off.
+ */
+.help-heading {
+  font-size: 19px;
+  font-weight: 660;
+  letter-spacing: -0.01em;
+  scroll-margin-top: 16px;
+}
+
+.help-body p {
+  max-width: 74ch;
+}
+
+.help-callout {
+  padding: 14px 16px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.help-callout p {
+  max-width: 72ch;
+}
+
+/* A word being defined right here, so the eye can find it again on the way
+   back up the page. */
+.help-term {
+  font-weight: 650;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-line);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+/* The definition lists that carry most of the help text: a wider, louder `kv`,
+   because here the term is the thing being looked up rather than a field
+   label beside a value. */
+.help-kv {
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: 14px 22px;
+}
+
+.help-kv dt {
+  font-size: 14px;
+  font-weight: 620;
+  color: var(--text);
+}
+
+.help-kv dd {
+  max-width: 72ch;
+  color: var(--text-muted);
+}
+
+.help-tag {
+  display: inline-block;
+  padding: 0 7px;
+  margin-right: 6px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.help-tag--keep {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+}
+
+/* ========================================================================== */
+/* Is this copy still the current one?                                        */
+/* -------------------------------------------------------------------------- */
+/* The drift banner. `DriftBanner.tsx` does not carry classes of its own — it  */
+/* renders the shared `Banner` primitive with `tone="danger"`, so the thing    */
+/* the member actually sees is `.banner-danger`, and that is what has to be    */
+/* right. This block is what makes it right, and it applies to every banner    */
+/* with more than a line in it.                                               */
+/*                                                                            */
+/* The one change that matters: banner *body* text is `--text`, not the status */
+/* colour. A tinted title is a signal; a tinted paragraph is just harder to    */
+/* read, and the drift banner is several sentences plus a date. Measured on    */
+/* this palette, body copy goes from 5.85:1 to 15.23:1 in light and 6.81:1 to  */
+/* 13.83:1 in dark. The title keeps the colour, so nothing is lost.           */
+/*                                                                            */
+/* The verdicts are drawn as four distinct things and never as shades of one:  */
+/* `behind` is an instruction (danger), `not-mirrored` an invitation (warn),   */
+/* `unknown` an admission that the check could not run (a quiet grey line, no  */
+/* banner at all) and `in-sync` a single green pill. Drawing `unknown` like    */
+/* `behind` would send a member on a train re-fetching 1.9 GB.                 */
+/* ========================================================================== */
+
+.banner-ok .banner-body,
+.banner-warn .banner-body,
+.banner-danger .banner-body {
+  color: var(--text);
+}
+
+/*
+ * The left edge carries the status colour at full strength. `.banner` already
+ * reserves 4px for it, and a solid bar reads at a glance and survives being
+ * printed, screenshotted or looked at by somebody who does not separate red
+ * from green — the tinted fill alone does not.
+ */
+.banner-ok {
+  border-left-color: var(--ok);
+}
+
+.banner-warn {
+  border-left-color: var(--warn);
+}
+
+.banner-danger {
+  border-left-color: var(--danger);
+}
+
+/* ========================================================================== */
+/* Gallery                                                                    */
+/* -------------------------------------------------------------------------- */
+/* `GalleryView.tsx` and `NftDetail.tsx` are written by another hand, and the  */
+/* two files moved while this sheet was being written — the tile's meta line   */
+/* has been both `__foot` and `__meta`, the search field both `.gallery-filter`*/
+/* and `.gallery-search`, the panel heading both `.nft-panel__title` and       */
+/* `.nft-title`. Where that happened both spellings are grouped onto the one   */
+/* rule. It costs a selector and it means a rename in either file cannot leave */
+/* a member looking at an unstyled grid. Prune once the gallery has settled.   */
+/*                                                                            */
+/* Pictures are `object-fit: contain`, never `cover`. Cropping every tile to   */
+/* fill a square looks tidier and is the wrong call here: this is somebody's   */
+/* artwork, and half of it is not it.                                          */
+/* ========================================================================== */
+
+/* The toolbar row itself, not the card around it — the count line lives
+   outside it, so this must not own the vertical rhythm of the whole block. */
+.gallery-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: flex-end;
+}
+
+.gallery-search,
+.gallery-filter {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.gallery-count {
+  margin-top: 10px;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
+  gap: 16px;
+}
+
+/* The `<li>` is only the grid cell; the button inside it is the card. */
+.gallery-grid > li {
+  display: flex;
+  min-width: 0;
+}
+
+/*
+ * The tile is a `<button>`, so this has to undo the platform's own button
+ * chrome before it can look like anything. `align-items: stretch` keeps the
+ * picture full width, and `height: 100%` keeps every tile in a row the same
+ * height however long the names are.
+ */
+.gallery-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  appearance: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.gallery-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
+}
+
+/*
+ * Both classes sit on the same element in the current markup. Kept as its own
+ * selector so the tile still resets correctly if the button ever goes back to
+ * being nested inside the card.
+ */
+.gallery-card__open {
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.gallery-media,
+.gallery-card__media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+
+.gallery-card__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.gallery-card__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 10px 12px 12px;
+}
+
+/* One line, clipped. The full name is on the button's `title` and in its
+   accessible name, so nothing is actually lost. */
+.gallery-card__name {
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 620;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Carries its own small/faint sizing: the bytes beside the pill are a bare
+   `<span>` in the markup. */
+.gallery-card__meta,
+.gallery-card__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.gallery-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 8px;
+}
+
+/*
+ * The tile for everything that is not a picture this window can draw — .glb
+ * models, video, audio, and files whose type nothing ever recorded, which is
+ * roughly a third of what BIC rescued. It says what the thing is. A broken
+ * image icon says only that the app is broken, which is both wrong and the
+ * easiest way to make a member distrust an archive that is fine.
+ *
+ * A `<span>` in a grid card and a `<div>` in the detail panel, so it sets its
+ * own `display` rather than inheriting one.
+ */
+.gallery-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 96px;
+  padding: 16px;
+  text-align: center;
+}
+
+.gallery-placeholder__glyph {
+  display: block;
+  font-size: 26px;
+  line-height: 1.15;
+  color: var(--text-faint);
+}
+
+.gallery-placeholder__label {
+  display: block;
+  max-width: 24ch;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* ========================================================================== */
+/* One NFT, up close                                                          */
+/* -------------------------------------------------------------------------- */
+/* `NftDetail.tsx` is a real modal: a portal onto `document.body`, `inert` on  */
+/* everything behind it, Escape to close and focus returned to the tile that   */
+/* opened it. So the overlay has to genuinely cover the window, including the  */
+/* sticky table headers and the sticky help contents, both at `z-index: 1`.    */
+/*                                                                            */
+/* That file ships a `GALLERY_FALLBACK_CSS` constant with the structural       */
+/* minimum for this panel, because for a while none of it was styled here and  */
+/* an unpositioned portal is not plain, it is invisible. It is *prepended* to  */
+/* `<head>` precisely so these rules beat it on document order. The rules      */
+/* below are that replacement: once the gallery files settle, the constant and */
+/* its `useGalleryStyles` hook can be deleted with nothing else to change.     */
+/*                                                                            */
+/* The panel scrolls in its middle only. Head and foot are pinned, because the */
+/* foot holds Close and a member who has scrolled through forty content IDs    */
+/* should not have to scroll back to leave.                                    */
+/* ========================================================================== */
+
+.nft-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: rgb(8 11 17 / 62%);
+}
+
+.nft-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  max-height: min(88vh, 100%);
+  min-height: 0;
+  margin: auto;
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  animation: nft-panel-in 140ms ease-out;
+}
+
+@keyframes nft-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The panel takes focus so the keyboard starts inside it; a ring around the
+   whole dialog would read as an error rather than as a starting point. */
+.nft-panel:focus {
+  outline: none;
+}
+
+.nft-panel__head {
+  display: flex;
+  flex: none;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.nft-title,
+.nft-panel__title {
+  font-size: 18px;
+  font-weight: 660;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.nft-panel__sub {
+  margin-top: 2px;
+}
+
+.nft-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  padding: 18px;
+  overflow-y: auto;
+}
+
+.nft-panel__foot {
+  display: flex;
+  flex: none;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 18px;
+  background: var(--bg-sunken);
+  border-top: 1px solid var(--border);
+}
+
+/* --- the artwork ---------------------------------------------------------- */
+
+.nft-media {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/*
+ * Capped well under the panel's own height on purpose. The picture is the
+ * point of this screen, but "On the network" is the *actionable* part of it,
+ * and at a larger cap a portrait image pushed the verdict below the fold on a
+ * laptop — so the one thing a member might have to do about this NFT was the
+ * one thing they could not see.
+ */
+.nft-media__img,
+.nft-media__video {
+  max-width: 100%;
+  max-height: 48vh;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+}
+
+.nft-media__audio {
+  width: min(100%, 420px);
+  margin-top: 4px;
+}
+
+/* --- the facts ------------------------------------------------------------ */
+
+.nft-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.nft-section__title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.nft-description {
+  max-width: 74ch;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Traits are a `<dl>` of `.nft-trait` cards rather than two columns of bare
+ * `dt`/`dd` — a collection with fifteen one-word traits reads as a list of
+ * scraps in a two-column grid, and as a set of chips here. Each pair is
+ * wrapped in a `<div>`, which is the one element `<dl>` allows in between.
+ */
+.nft-traits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.nft-trait {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.nft-trait__label {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.nft-trait__value {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Content IDs are long and every character of one matters, so the table
+   scrolls inside its wrapper rather than forcing the panel wide. */
+.nft-cids {
+  font-size: 13px;
+}
+
+.nft-cids td,
+.nft-cids th {
+  vertical-align: top;
+}
+
+/*
+ * The raw metadata, closed by default. It answers "what did the token actually
+ * say?", which almost nobody asks and the one person who does needs in full.
+ * Some collections inline a whole picture as text, so it scrolls in place
+ * instead of making the panel a mile long.
+ */
+.nft-json {
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.nft-json > summary {
+  font-size: 13px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.nft-json__code {
+  max-height: 320px;
+  margin-top: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ========================================================================== */
+/* First run, continued                                                       */
+/* -------------------------------------------------------------------------- */
+/* `Welcome.tsx` is written elsewhere and builds on `.welcome*` above; these   */
+/* are the few extra hooks a first-run screen usually needs.                   */
+/* ========================================================================== */
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.welcome-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  counter-reset: welcome-step;
+}
+
+.welcome-step {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.welcome-step::before {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent);
+  counter-increment: welcome-step;
+  content: counter(welcome-step);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+}
+
+/* ========================================================================== */
 /* Narrow windows                                                             */
 /* ========================================================================== */
 
@@ -1866,6 +2808,71 @@ button.assets-stat:hover {
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   }
 
+  /*
+   * The contents list stops being a column beside the text and becomes a block
+   * of links above it. Sticky is dropped with it: pinned to the top of a narrow
+   * window it would eat most of the screen it was meant to help navigate.
+   */
+  .help-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .help-toc {
+    position: static;
+  }
+
+  .help-toc__list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr));
+  }
+
+  /* A definition list two columns wide, in a narrow window, is one word per
+     line down the left and a ribbon down the right. Stack them instead. */
+  .help-kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .help-kv dd {
+    max-width: none;
+    margin-bottom: 12px;
+  }
+
+  .gallery-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 145px), 1fr));
+    gap: 12px;
+  }
+
+  /*
+   * The panel gives up its margins and becomes the window. At this width a
+   * floating dialog with a sliver of backdrop around it is neither a page nor a
+   * modal, and the backdrop is not worth the room it costs.
+   */
+  .nft-overlay {
+    padding: 0;
+  }
+
+  .nft-panel {
+    width: 100%;
+    max-height: 100%;
+    min-height: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .nft-panel__head,
+  .nft-panel__body,
+  .nft-panel__foot {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .nft-media__img,
+  .nft-media__video {
+    max-height: 46vh;
+  }
+
   .main-scroll {
     padding: 22px 18px 36px;
   }
@@ -1897,6 +2904,20 @@ button.assets-stat:hover {
 
   .spinner {
     border-top-color: var(--accent);
+    animation: none;
+  }
+
+  /* The gallery tile's hover lift is decoration, and decoration that moves is
+     exactly what this block exists to remove. The border and shadow still
+     change, so the tile is no less obviously pressable. */
+  .gallery-card:hover {
+    transform: none;
+  }
+
+  /* The panel still appears, it just stops sliding. The blanket rule above
+     shortens the animation to nothing; naming it here means the panel is never
+     left mid-transform if that rule is ever relaxed. */
+  .nft-panel {
     animation: none;
   }
 }

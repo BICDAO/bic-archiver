@@ -17,10 +17,27 @@ import { defineConfig } from 'vitest/config'
  * binds its one real HTTP server to 127.0.0.1), so it belongs in the suite CI runs
  * — and it is the only coverage the pinning engine has. It carries its own config
  * as well, for running that subset alone; the two must agree.
+ *
+ * `test/node/` is here for the same reason. It is offline (its harness routes
+ * `fetch` itself and serves a real tar.gz from memory), and `test/node/vitest.config.ts`
+ * already documents itself as a subset of this suite — so leaving it out meant 25
+ * tests over the code that downloads and executes a binary never ran in CI.
+ *
+ * `test/drift/` likewise. It routes `fetch` and additionally replaces
+ * `node:dns/promises`, because taking `fetch` away does nothing about a DNS
+ * lookup — left alone, the drift tests would resolve a real domain and turn into
+ * a report on whoever's network. With that replaced they are fully offline, and
+ * they are the only coverage of the check that decides whether a member is told
+ * to re-copy 1.8 GB.
  */
 export default defineConfig({
   test: {
-    include: ['test/*.test.ts', 'test/pinning/*.test.ts'],
+    include: [
+      'test/*.test.ts',
+      'test/pinning/*.test.ts',
+      'test/node/*.test.ts',
+      'test/drift/*.test.ts'
+    ],
     exclude: ['test/live/**', 'node_modules/**', 'out/**', 'release/**'],
     environment: 'node',
     setupFiles: ['test/setup/no-network.ts'],

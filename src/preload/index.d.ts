@@ -51,6 +51,18 @@ export type {
 } from '../shared/community'
 
 /**
+ * The managed-node and drift shapes come from `src/shared/node.ts`, re-exported
+ * for the same reason as the rest: a component can name them without reaching
+ * into `src/main`, where the code that downloads and runs a binary lives.
+ *
+ * `KUBO_DIST`, `KUBO_PLATFORMS`, `AUTOSTART_LABEL` and `DEFAULT_STORAGE_MAX` are
+ * *values*, so they are deliberately not here. The window has no business
+ * naming a download location or a login-item label — those are decided in the
+ * main process and nothing the renderer sends can change them.
+ */
+export type { DriftStatus, ManagedNodeStatus, NodeInstallProgress, NodeState } from '../shared/node'
+
+/**
  * The pinning shapes come from `src/shared/pinning.ts` and are re-exported here
  * so a component can name them without reaching across the tree — and so the
  * window never has to import from `src/main`, where the Pinata key lives.

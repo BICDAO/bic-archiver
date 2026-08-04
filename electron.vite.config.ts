@@ -17,12 +17,30 @@ import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import type { Plugin } from 'vite'
 
+import { MEDIA_SCHEME } from './src/shared/community'
+
 const projectRoot = fileURLToPath(new URL('.', import.meta.url))
 const rendererRoot = resolve(projectRoot, 'src/renderer')
 
 /* -------------------------------------------------------------------------- */
 /* Content-Security-Policy                                                    */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The scheme the main process serves archived pictures and video on.
+ *
+ * Imported from the shared contract rather than written out, because these
+ * policies and the ones in `src/main/index.ts` have to agree exactly and a
+ * typo here would be invisible: the only symptom is that every thumbnail in
+ * the gallery is blocked, as a console message no member will ever read.
+ * That is not hypothetical — the two policies had already drifted apart, and
+ * the packaged app shipped with every picture blocked.
+ *
+ * It is not a remote origin. Requests on it never leave the process; they are
+ * answered from blocks already on this disk by `community/mediaProtocol.ts`,
+ * which serves nothing but a valid CID out of the open archive.
+ */
+const MEDIA_SRC = `${MEDIA_SCHEME}:`
 
 /**
  * The packaged window loads over `file://`, which `session.webRequest` never
@@ -33,13 +51,18 @@ const rendererRoot = resolve(projectRoot, 'src/renderer')
  * opaque origin, and `'self'` alone is not reliably matched against it across
  * Chromium versions. Everything remote is still refused, which is the point:
  * the window never talks to the network — the main process does.
+ *
+ * `connect-src` deliberately does *not* list `bic-media:`. The window displays
+ * archived files, it never reads their bytes: `<img>` and `<video>` need
+ * `img-src` / `media-src`, and nothing in the renderer calls `fetch()` at all.
+ * Leaving it out keeps "the window cannot fetch anything" true.
  */
 const PROD_CSP = [
   "default-src 'none'",
   "script-src 'self' file:",
   "style-src 'self' file: 'unsafe-inline'",
-  "img-src 'self' file: data: blob:",
-  "media-src 'self' file: data: blob:",
+  `img-src 'self' file: data: blob: ${MEDIA_SRC}`,
+  `media-src 'self' file: data: blob: ${MEDIA_SRC}`,
   "font-src 'self' file: data:",
   "connect-src 'self' data: blob:",
   "worker-src 'self' blob:",
@@ -54,8 +77,8 @@ const DEV_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' data: blob:",
+  `img-src 'self' data: blob: ${MEDIA_SRC}`,
+  `media-src 'self' data: blob: ${MEDIA_SRC}`,
   "font-src 'self' data:",
   "connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*",
   "worker-src 'self' blob:",

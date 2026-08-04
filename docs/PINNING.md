@@ -5,9 +5,21 @@ Those are two different properties, and the gap between them is where this DAO
 has already lost content.
 
 This document explains what was measured, why the obvious fix does not work, what
-does work and why, and how to set both halves of it up.
+does work and why, and how to set it up.
 
-- Members who just want the steps: [`FOR-MEMBERS.md`](FOR-MEMBERS.md) §8.
+> **What changed, in one paragraph.** Earlier versions of this page presented a
+> hosted pinning service as the main route and a local node as the advanced
+> option. That is now the wrong way round, and not as a matter of taste: Storacha's
+> infrastructure no longer exists (NXDOMAIN — [§7](#7-storacha-is-gone--a-correction)),
+> and Pinata's pin-by-CID has turned out to be a **paid-only** feature whose free
+> tier could not hold this archive in any case ([§2a](#2a-and-pin-by-cid-is-now-a-paid-pinata-feature)).
+> **The route is your own node, and the app installs and runs it for you** — no
+> terminal, no account, no payment. Pinata is now an optional extra for people who
+> have a paid plan. See [`RUNNING-A-NODE.md`](RUNNING-A-NODE.md).
+
+- Members who just want the steps: [`FOR-MEMBERS.md`](FOR-MEMBERS.md).
+- Running a node — cost, privacy, troubleshooting: [`RUNNING-A-NODE.md`](RUNNING-A-NODE.md).
+- Copying BIC's whole archive: [`MIRRORING.md`](MIRRORING.md).
 - Everything else about the engine: [`HOW-IT-WORKS.md`](HOW-IT-WORKS.md).
 
 ---
@@ -95,6 +107,43 @@ connects the two until you make your computer a *provider* for those CIDs.
 decision below follows from it. A future maintainer who "simplifies" the pinning
 path down to `pinByHash` alone will produce something that works perfectly on the
 95% that never needed help and fails silently on the 4% that is the whole point.
+
+---
+
+## 2a. And pin-by-CID is now a paid Pinata feature
+
+Section 2 explains why pin-by-CID cannot rescue *dead* content. There is now a
+second, blunter reason it cannot carry this archive, and it applies to the
+healthy 95% too.
+
+**Verified live against the real API:** on a free account,
+`POST https://api.pinata.cloud/pinning/pinByHash` answers
+
+```
+403  { "error": { "reason": "PAID_FEATURE_ONLY",
+                  "details": "You must be on a paid plan to pin by CID" } }
+```
+
+This is a fact about the **account**, not the key. The app says so in as many
+words, because the instinctive response to a 403 is to go and make a new key:
+
+> Pinata will not do this on a free account. Pinning by CID is a paid Pinata
+> feature… this is a limit of the plan, not a problem with your key. Making a new
+> key or changing its permissions will not help… running your own IPFS node keeps
+> the archive alive just as well and costs nothing, and this app can set one up
+> for you.
+
+A genuine permissions 403 (`NO_SCOPES_FOUND`) still gets the original
+check-your-key wording; the two are distinguished by the response *body*, not the
+status code, because a plan limit may be reported under another code.
+
+And even with a paid plan, the free tier's size limits were never going to work:
+**1 GB and 500 files**, against an archive of **1.9 GB and 20,808 files**. Short
+by a factor of two on bytes and forty on file count.
+
+So Pinata is documented here as what it now is: a **useful optional extra for
+whoever in the DAO has a paid plan**, and not the answer for members. The answer
+for members is [§4](#4-your-own-node--the-app-sets-it-up-for-you).
 
 ---
 
@@ -212,28 +261,38 @@ than the lookups.
 
 ---
 
-## 4. Setting up Kubo (your own IPFS node)
+## 4. Your own node — the app sets it up for you
 
 Kubo is the reference IPFS implementation. It is one binary, it needs no account,
-and it costs nothing. The app talks to it over its local HTTP RPC and never
-touches your repo except to import blocks and add pins.
+and it costs nothing.
 
-### macOS
+**You no longer install it by hand.** Open **Settings ▸ Your own IPFS node** and
+press the set-up button (or take the offer on the welcome screen). The app
+downloads Kubo v0.43.0 from the official host over HTTPS, **verifies its SHA-512
+before unpacking or running a single byte of it**, creates a repository in its
+own folder, starts the node, checks that it actually answers, and installs a
+login item so it keeps serving after you close the app.
 
-```sh
-brew install kubo   # installs the `ipfs` command
-ipfs init           # creates ~/.ipfs — once, ever, on this machine
-ipfs daemon         # starts the node; leave this window open
-```
+That last part is the difference between a provider and a person who happens to
+have an app open. **Leaving a terminal window open forever was never a workable
+plan**, and it is why earlier versions of this document had to lean on a hosted
+service to cover the hours a laptop was shut. It does not any more.
 
-`brew install kubo` currently gives 0.42.0; anything from 0.20 upward is fine.
+Full detail — what it costs in disk and bandwidth, what running a node reveals
+about your IP address, where the files go, and how to fix the three things that
+actually go wrong — is in [`RUNNING-A-NODE.md`](RUNNING-A-NODE.md).
 
-### Windows and Linux
+### If you already run Kubo
 
-Download the binary from <https://docs.ipfs.tech/install/command-line/>, put it
-on your `PATH`, then run the same `ipfs init` and `ipfs daemon`.
+The app finds it, uses it, and reports it as **external**: it will not
+reconfigure it, will not change its ports, will not set it to autostart, and will
+not uninstall it. Your node stays yours. `ipfs init` / `ipfs daemon` from
+Homebrew, IPFS Desktop or your own build all work fine.
 
-### What each command actually does
+### Doing it by hand anyway
+
+Nothing stops you. Install from <https://docs.ipfs.tech/install/command-line/> or
+`brew install kubo`, then:
 
 - **`ipfs init`** creates the repository at `~/.ipfs` and generates the node's
   identity — its peer ID and private key. Run once. Running it again on an
@@ -244,26 +303,25 @@ on your `PATH`, then run the same `ipfs init` and `ipfs daemon`.
   blocks to whoever asks.
 
 **The daemon must be running for any of this to mean anything.** A pinned CID on
-a stopped node is served to nobody — it is a `.car` file with extra steps. Close
-the terminal window and you are back to where the DAO was in 2024. If the machine
-is going to sleep, the content is unreachable for as long as it sleeps.
-
-Leaving a terminal open forever is a poor plan, which is the honest argument for
-pairing it with Pinata: the node is what *rescues* the content, Pinata is what
-*keeps it up* when your laptop is shut.
+a stopped node is served to nobody — it is a `.car` file with extra steps. If the
+machine sleeps, the content is unreachable for as long as it sleeps. This is
+exactly what the managed node's login item exists to prevent.
 
 ### In the app
 
 **Settings ▸ Your own IPFS node.** The address defaults to
-`http://127.0.0.1:5001` and should not need changing. When the node answers, the
-screen shows its peer ID and the addresses it offered — those are the exact
-strings handed to Pinata as `hostNodes`.
+`http://127.0.0.1:5001` and should not need changing — if the app had to move the
+port because something else held it, it fills the new one in and tells you. When
+the node answers, the screen shows its peer ID, its storage use and the addresses
+it offered.
 
 ### Three practical points
 
 - **Disk.** The node keeps its own copy of the blocks, so importing a 1.8 GB
-  backup costs about 1.8 GB in `~/.ipfs` on top of the archive folder. `ipfs repo
-  stat` shows the total.
+  backup costs about 1.8 GB in the node's repository on top of the archive
+  folder. `ipfs repo stat` shows the total; the app shows it in Settings. A
+  managed node keeps its repository in the app's own data folder rather than
+  `~/.ipfs`, with a 20 GiB ceiling.
 - **`ipfs repo gc` deletes everything unpinned.** Anything imported with
   `pin-roots=true`, or pinned afterwards, survives. Anything else does not. The
   app never runs `gc` for you.
@@ -274,11 +332,19 @@ strings handed to Pinata as `hostNodes`.
 
 ---
 
-## 5. Setting up Pinata
+## 5. Pinata — optional, and only useful on a paid plan
 
 Pinata is a commercial pinning service: it holds content on IPFS for you, on
 machines that do not go to sleep. The DAO signs up itself; this app never touches
 an account or a payment.
+
+**Read [§2a](#2a-and-pin-by-cid-is-now-a-paid-pinata-feature) first.** On a free
+account, pin-by-CID returns `403 PAID_FEATURE_ONLY` and nothing below will work;
+and the free tier's 1 GB / 500 files cannot hold a 1.9 GB / 20,808-file archive
+even on a plan that permits it. Nobody needs a Pinata key to help BIC — the node
+in [§4](#4-your-own-node--the-app-sets-it-up-for-you) does the job, for free.
+This section is for whoever in the DAO has the paid account. In the app, Pinata
+lives in a collapsed section of Settings for exactly that reason.
 
 1. Sign in at <https://app.pinata.cloud>.
 2. Go to **API Keys**
@@ -320,24 +386,35 @@ retrieval only and is never required.
 
 ## 6. Troubleshooting
 
+### "Pinata will not do this on a free account" — `403 PAID_FEATURE_ONLY`
+
+**What it means.** Pinning by CID is a paid Pinata feature. This is a fact about
+the plan, not the key: making a new key, or giving it more permissions, will not
+change it. See [§2a](#2a-and-pin-by-cid-is-now-a-paid-pinata-feature).
+
+**What to do.** Nothing, unless somebody in the DAO has a paid plan. Set up your
+own node instead — the app does the whole thing, it costs nothing, and it keeps
+the archive alive just as well. See
+[`RUNNING-A-NODE.md`](RUNNING-A-NODE.md).
+
+(A genuine permissions problem reports `NO_SCOPES_FOUND` and gets the
+check-your-key message below instead. The two are told apart by the response
+body, not the status code.)
+
 ### "Pinata could not find this content anywhere on the network" — job `expired`
 
 **What it means.** Pinata searched, and nothing on the public network is offering
 that content. This is not a Pinata fault and retrying will not help — it is
 [section 2](#2-why-pin-by-cid-cannot-rescue-dead-content) happening to you.
 
-**What to do.** Start your own node, import the backup into it, and pin again:
+**What to do.** Get your own node running, so there is somewhere for Pinata to
+fetch from, then pin again: **Settings ▸ Your own IPFS node** (the app installs
+and starts it), then **Assets ▸ Pin everything**. The app exports a `.car` if it
+needs one, imports it into the node, and re-asks Pinata with `hostNodes` pointing
+at you. With a node you run yourself, the same thing by hand is:
 
 ```sh
-ipfs daemon                 # in its own terminal window, leave it running
-```
-
-then in the app, **Settings** → switch on your own IPFS node, then
-**Assets ▸ Pin everything**. The app exports a `.car` if it needs one, imports it
-into the node, and re-asks Pinata with `hostNodes` pointing at you. Manually, the
-same thing is:
-
-```sh
+ipfs daemon                          # leave it running
 ipfs dag import /path/to/BIC-backup.car
 ```
 
@@ -371,9 +448,16 @@ Give it a minute after starting and check again.
 
 ### "No node answered at that address"
 
-Nothing is listening on `127.0.0.1:5001`. Either the daemon is not running (the
-`ipfs daemon` window was closed, or the machine slept), or it is on a different
-port. Start it; the app re-checks whenever you open Settings.
+Nothing is listening on `127.0.0.1:5001`. Either the node is not running (a
+managed node that has been stopped, an `ipfs daemon` window that was closed, or a
+machine that slept), or it is on a different port. Start it from Settings; the app
+re-checks whenever you open that screen.
+
+If it refuses to start with no useful error at all, suspect a leftover
+`repo.lock` — a hard shutdown leaves one behind, and it blocks every subsequent
+start **silently**. The app clears stale locks on its own; the manual fix and the
+reason it is dangerous to do carelessly are in
+[`RUNNING-A-NODE.md` §7](RUNNING-A-NODE.md#a-stale-repolock--the-one-that-silently-blocks-every-start).
 
 ### Pinata says the key is not valid
 
@@ -383,9 +467,11 @@ are different, shorter strings.
 
 ### "Your Pinata account has used up its free storage allowance"
 
-Exactly what it says. The 1.8 GB backup does not fit in a small free tier. Free
-up space in the Pinata dashboard or move to a paid plan, then run the pin again —
-already-pinned items are skipped, so nothing is repeated.
+Exactly what it says, and it is not a near miss: the free tier is **1 GB and 500
+files**, and the archive is **1.9 GB and 20,808 files**. Free up space in the
+Pinata dashboard or move to a paid plan, then run the pin again — already-pinned
+items are skipped, so nothing is repeated. Or use a node, which has no such limit
+and no bill.
 
 ### A job sits at "Pinata has queued this and is fetching it"
 
@@ -417,17 +503,23 @@ Earlier versions of these docs and of the Export screen pointed members at
 - `storacha.network` redirects to `fil.one`.
 
 Anything that tells a member to upload a `.car` to Storacha will send them to a
-dead end at the exact moment they are trying to save content. The replacements
-are the two destinations documented above:
+dead end at the exact moment they are trying to save content. The replacement is
+the destination documented above:
 
-- **Your own Kubo node** — no account, no payment, and the only thing that can
-  bring dead CIDs back at all.
-- **Pinata** — for keeping content up when your machine is not.
+- **Your own Kubo node** — no account, no payment, the only thing that can bring
+  dead CIDs back at all, and now installed and kept running by the app itself.
+- **Pinata**, additionally, for whoever holds the DAO's paid plan.
 
-There is a lesson in this beyond a broken link. The DAO's content did not survive
-because a service promised to keep it; it survived where *several unrelated
-people* happened to keep it. Treat any single pinning service, including Pinata,
-as one copy among several — and keep the `.car` file in Drive regardless.
+There is a lesson in this beyond a broken link, and it is the reason the app was
+rearranged around member-run nodes. **Both hosted services BIC relied on have now
+failed it** — one by ceasing to exist, one by moving the feature behind a paywall
+whose free tier was two-fifths of the size needed. Neither did anything wrong;
+each was simply a single point of failure, and the DAO's content only ever
+survived where *several unrelated people* happened to be keeping it.
+
+So treat any single pinning service, including Pinata, as one copy among several —
+keep the `.car` file in Drive regardless, and get as many members as possible
+running nodes.
 
 ---
 
@@ -444,9 +536,13 @@ Honest gaps, so nobody documents a promise the code does not keep:
   swallows throws from its progress callback, so there is no way to interrupt it.
   The signal is checked either side, so a member who presses Stop during a 1.8 GB
   pack waits for the pack to finish and then stops.
-- **Kubo pins only serve while the daemon runs.** There is no "install as a
-  service" step in the app, and no supervision. Closing the terminal stops the
-  node.
+- **Kubo pins only serve while the node runs**, which is still true — but the app
+  now installs a real login item (LaunchAgent / systemd user unit / Startup shim)
+  with crash recovery, so a managed node comes back after a logout, a reboot or a
+  crash without anybody remembering to do anything. A node you installed yourself
+  is still yours to supervise. One caveat: on macOS, `KeepAlive` is set and
+  accepted, but on battery power the OS may defer the respawn after a crash — see
+  [`RUNNING-A-NODE.md` §7](RUNNING-A-NODE.md#macos-launchctl-load-is-deprecated-and-worse-than-deprecated).
 
 ---
 
@@ -456,9 +552,10 @@ Honest gaps, so nobody documents a promise the code does not keep:
 | --- | --- |
 | `src/shared/pinning.ts` | The fixed contract: `PinState`, `PinTargetStatus`, `AssetRow`, `PinRunSummary`, `PinningSettings`, `KUBO_RPC`, `PINATA`. Read the header comment first. |
 | `src/main/pinning/kubo.ts` | `detectKubo`, `importCarToKubo`, `pinCid`, `listPins`. Streams the CAR; classifies multiaddrs. |
-| `src/main/pinning/pinata.ts` | `testPinataAuth`, `pinByCid`, `pinJobResult`, `listPinnedCids`. Every returned string is redacted. |
+| `src/main/pinning/pinata.ts` | `testPinataAuth`, `pinByCid`, `pinJobResult`, `listPinnedCids`. Every returned string is redacted. `isPlanLimitation()` matches the response *body*, so `PAID_FEATURE_ONLY` is told apart from a real permissions 403. |
 | `src/main/pinning/manager.ts` | `getTargets`, `pinAll`, `pinArchive` — the four-step sequence, progress, verification, summaries. |
 | `src/main/pinning/assets.ts` | `buildAssetRows`, `mergeHealth`, `mergePinStates`, `summarise` — one row per entry in the archive. |
 | `src/main/settings.ts` | Settings on disk, plus the `safeStorage` token. |
+| `src/main/node/` | The managed node — download and SHA-512 verification, repository, login item, lifecycle. See [`RUNNING-A-NODE.md`](RUNNING-A-NODE.md). |
 | `src/renderer/components/AssetsView.tsx` | The Assets screen: what is in the archive, who is keeping it, what to press. |
-| `src/renderer/components/PinningSettings.tsx` | Settings ▸ node and key. The key is never in React state. |
+| `src/renderer/components/PinningSettings.tsx` | Settings ▸ node first, Pinata in a collapsed section. The key is never in React state. |

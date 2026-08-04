@@ -29,6 +29,7 @@ import type {
   MirrorProgress,
   MirrorResult
 } from '../shared/community'
+import type { DriftStatus, ManagedNodeStatus, NodeInstallProgress } from '../shared/node'
 import type {
   AssetRow,
   PinProgress,
@@ -316,6 +317,72 @@ export interface ArchiverApi {
    */
   galleryItem(folder: string, opId?: string): Promise<IpcResult<GalleryItem | null>>
 
+  // --- this computer's own IPFS node ---------------------------------------
+  /**
+   * `node:status` — what is on this computer: a node this app set up, one the
+   * member already had, or nothing yet.
+   *
+   * Cheap and read-only, and it never fails because a node is missing or is not
+   * answering — that is the answer, in `state` and a plain-English `detail`. Safe
+   * to poll while an install is running.
+   *
+   * `managed` is the field that decides what a screen may offer. `false` means
+   * the node belongs to the member (Homebrew, IPFS Desktop, their own set-up):
+   * show it, use it, and offer no start, stop, uninstall or autostart control
+   * for it — those calls will refuse, and rightly.
+   */
+  nodeStatus(opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+  /**
+   * `node:install` — download, verify, configure and start a real IPFS node,
+   * then set it to come back at login. Streams `node-progress` events.
+   *
+   * The longest thing in the app after mirroring, and the one a member is least
+   * able to interpret on their own: an ~80 MB download and several minutes of
+   * set-up. Pass an `opId`, draw the progress, and offer a Stop button. Stopping
+   * leaves nothing running, and starting again picks up where it left off.
+   *
+   * There is nothing to configure here and that is deliberate — where the binary
+   * comes from and how it is checked are fixed in the main process, so no screen
+   * can point this at a different download. Safe to call again at any time: on a
+   * computer that already has a working node it installs nothing.
+   */
+  installNode(opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+  /** `node:start` — start the node this app installed. */
+  startNode(opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+  /** `node:stop` — stop the node this app installed. Refuses to touch any other. */
+  stopNode(opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+  /**
+   * `node:uninstall` — remove the node this app installed.
+   *
+   * The member's copy of the archive is kept: this removes the program, not the
+   * 1.9 GB it was serving. Refuses to touch a node this app did not install.
+   */
+  uninstallNode(opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+  /**
+   * `node:setAutostart` — whether the node comes back when the member logs in.
+   *
+   * Worth a prominent switch rather than a preference buried somewhere: a node
+   * that does not survive a reboot stops serving the archive the first time
+   * someone shuts their laptop, and nothing announces that it has.
+   */
+  setAutostart(enabled: boolean, opId?: string): Promise<IpcResult<ManagedNodeStatus>>
+
+  // --- is your copy still the current one? ---------------------------------
+  /**
+   * `drift:check` — has BIC published a newer archive than the one this member
+   * is serving?
+   *
+   * The published root moves whenever the archive is updated, so a member who
+   * mirrored months ago may be serving a copy that is quietly out of date.
+   *
+   * Read `verdict` carefully before writing any wording around it. `'behind'` is
+   * an instruction — copy the archive again. `'unknown'` is an admission: the
+   * published address could not be resolved, usually because the member is
+   * offline, and it says nothing whatsoever about their copy. Never draw those
+   * two the same way.
+   */
+  checkDrift(opId?: string): Promise<IpcResult<DriftStatus>>
+
   // --- native pickers ------------------------------------------------------
   /** `dialog:pickDirectory` — resolves to null when the member cancels. */
   pickDirectory(options?: DialogOptions): Promise<IpcResult<string | null>>
@@ -349,6 +416,8 @@ export interface ArchiverApi {
   onPinProgress(callback: (progress: PinProgress) => void): () => void
   /** Subscribe to mirroring progress. Returns an unsubscribe function. */
   onMirrorProgress(callback: (progress: MirrorProgress) => void): () => void
+  /** Subscribe to node set-up progress. Returns an unsubscribe function. */
+  onNodeProgress(callback: (progress: NodeInstallProgress) => void): () => void
 }
 
 /* -------------------------------------------------------------------------- */
@@ -459,6 +528,17 @@ const api: ArchiverApi = {
   listGallery: (opId) => call<GalleryItem[]>('gallery:list', { opId }),
   galleryItem: (folder, opId) => call<GalleryItem | null>('gallery:item', { folder, opId }),
 
+  nodeStatus: (opId) => call<ManagedNodeStatus>('node:status', { opId }),
+  // No payload beyond the cancellation handle, on purpose: nothing a screen can
+  // send is allowed to influence which binary gets downloaded or run.
+  installNode: (opId) => call<ManagedNodeStatus>('node:install', { opId }),
+  startNode: (opId) => call<ManagedNodeStatus>('node:start', { opId }),
+  stopNode: (opId) => call<ManagedNodeStatus>('node:stop', { opId }),
+  uninstallNode: (opId) => call<ManagedNodeStatus>('node:uninstall', { opId }),
+  setAutostart: (enabled, opId) => call<ManagedNodeStatus>('node:setAutostart', { enabled, opId }),
+
+  checkDrift: (opId) => call<DriftStatus>('drift:check', { opId }),
+
   pickDirectory: (options) => call<string | null>('dialog:pickDirectory', options ?? {}),
   saveCar: (options) => call<string | null>('dialog:saveCar', options ?? {}),
   openCar: (options) => call<string | null>('dialog:openCar', options ?? {}),
@@ -472,7 +552,8 @@ const api: ArchiverApi = {
   onProgress: (callback) => subscribe<ProgressEvent>('progress', callback),
   onHealth: (callback) => subscribe<HealthResult>('health', callback),
   onPinProgress: (callback) => subscribe<PinProgress>('pin-progress', callback),
-  onMirrorProgress: (callback) => subscribe<MirrorProgress>('mirror-progress', callback)
+  onMirrorProgress: (callback) => subscribe<MirrorProgress>('mirror-progress', callback),
+  onNodeProgress: (callback) => subscribe<NodeInstallProgress>('node-progress', callback)
 }
 
 contextBridge.exposeInMainWorld('api', api)

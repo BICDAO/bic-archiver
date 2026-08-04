@@ -2,7 +2,7 @@
  * The window: which archive is open, which screen is showing, and what the
  * engine is doing right now.
  *
- * Three decisions here are worth knowing about:
+ * Four decisions here are worth knowing about:
  *
  *  • Every screen stays mounted once an archive is open, hidden rather than
  *    unmounted. Archiving 200 tokens takes a while, and a member who clicks
@@ -20,9 +20,16 @@
  *    it has finished. The engine writes each token to disk the moment it lands,
  *    so re-reading is the only way to be certain the sidebar count and the
  *    Archive table match what is actually saved.
+ *
+ *  • Settings and Help are reachable with no archive open. They used to live
+ *    only in the sidebar, and the sidebar only exists once an archive has been
+ *    created — so a member could not set up their IPFS node until after they had
+ *    archived something, which is the wrong way round. Both now render
+ *    full-width over the welcome screen with a Back control, and the welcome
+ *    screen offers a visible way in.
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import type { ProgressEvent } from '../shared/types'
 import type { ArchiveSnapshot } from '../preload'
@@ -32,16 +39,28 @@ import { AddTokensView } from './components/AddTokensView'
 import { ProgressList } from './components/ProgressList'
 import ArchiveView from './components/ArchiveView'
 import AssetsView from './components/AssetsView'
+import DriftBanner from './components/DriftBanner'
 import ExportView from './components/ExportView'
+import GalleryView from './components/GalleryView'
 import HealthView from './components/HealthView'
+import Help from './components/Help'
 import PinningSettings from './components/PinningSettings'
-import { Banner, Card, formatCount } from './components/Layout'
+import Welcome from './components/Welcome'
+import { formatCount } from './components/Layout'
 
 /* ========================================================================== */
 /* Navigation                                                                 */
 /* ========================================================================== */
 
-type ViewId = 'add' | 'archive' | 'assets' | 'health' | 'export' | 'settings'
+type ViewId =
+  | 'add'
+  | 'archive'
+  | 'gallery'
+  | 'assets'
+  | 'health'
+  | 'export'
+  | 'settings'
+  | 'help'
 
 interface NavEntry {
   id: ViewId
@@ -79,6 +98,23 @@ const NAV: NavEntry[] = [
     )
   },
   {
+    /*
+     * Directly after Archive on purpose. The Archive screen is a table of
+     * content IDs; this is the same archive as the pictures it exists to save,
+     * and a member who has just added 200 NFTs wants to see them, not to read
+     * their hashes.
+     */
+    id: 'gallery',
+    label: 'Gallery',
+    icon: (
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" {...stroke}>
+        <path d="M2.2 3.4h11.6v9.2H2.2z" />
+        <circle cx="5.7" cy="6.5" r="1.1" />
+        <path d="m2.6 12.2 3.5-3.5 2 2 2-2.3 3.3 3.8" />
+      </svg>
+    )
+  },
+  {
     id: 'assets',
     label: 'Assets',
     icon: (
@@ -111,10 +147,11 @@ const NAV: NavEntry[] = [
 ]
 
 /**
- * Settings sits apart from the rest, at the foot of the sidebar. It is not a
- * step in the job — a member goes there once to say where content should be
- * pinned, and then rarely again — so putting it in the run of screens would
- * imply it is something you do every time.
+ * Settings and Help sit apart from the rest, at the foot of the sidebar.
+ * Neither is a step in the job — a member goes to Settings once to say where
+ * content should be pinned, and to Help when a word on screen means nothing to
+ * them — so putting either in the run of screens would imply it is something you
+ * do every time.
  */
 const SETTINGS: NavEntry = {
   id: 'settings',
@@ -128,6 +165,20 @@ const SETTINGS: NavEntry = {
     </svg>
   )
 }
+
+const HELP: NavEntry = {
+  id: 'help',
+  label: 'Help',
+  icon: (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" {...stroke}>
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M6.2 6.3a1.8 1.8 0 1 1 2.5 1.66c-.5.22-.76.66-.76 1.15v.24" />
+      <path d="M8 11.6h.01" />
+    </svg>
+  )
+}
+
+const SECONDARY_NAV: NavEntry[] = [SETTINGS, HELP]
 
 function NavButton({
   entry,
@@ -156,6 +207,38 @@ function NavButton({
 }
 
 /* ========================================================================== */
+/* A screen with no archive behind it                                         */
+/* ========================================================================== */
+
+/**
+ * Settings or Help, shown over the welcome screen when no archive is open.
+ *
+ * There is no sidebar to go back to at this point, so the Back control is the
+ * only way out and has to be the first thing on the screen. The two stacked
+ * `.view` wrappers line up because both centre themselves at the same width.
+ */
+function StandaloneScreen({
+  onBack,
+  children
+}: {
+  onBack: () => void
+  children: ReactNode
+}): ReactNode {
+  return (
+    <>
+      <div className="view" style={{ gap: 0, paddingBottom: 22 }}>
+        <div className="row">
+          <button type="button" className="btn" onClick={onBack}>
+            ← Back to the start
+          </button>
+        </div>
+      </div>
+      {children}
+    </>
+  )
+}
+
+/* ========================================================================== */
 /* The shell                                                                  */
 /* ========================================================================== */
 
@@ -167,6 +250,23 @@ export default function App(): ReactNode {
   const snapshot = archive.snapshot
   const booting = !archive.ready
   const hasArchive = snapshot !== null
+
+  /*
+   * Every screen shares one scrolling column, so without this a member who
+   * clicks Settings from the foot of the welcome screen arrives half-way down
+   * Settings — which, since the top of that screen is then empty, reads as a
+   * window that has failed to draw. Changing screen puts you at the top of it.
+   *
+   * Both are needed. With an archive open the sidebar pins the window and the
+   * `.main-scroll` column does the scrolling; with no archive open that column
+   * is the whole page and it is the document that scrolls, so resetting only the
+   * element would silently do nothing on precisely the screen that needs it.
+   */
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+    window.scrollTo({ top: 0 })
+  }, [view, switching, hasArchive])
 
   /*
    * Whenever a job reports that it has finished — anywhere in the window,
@@ -198,6 +298,21 @@ export default function App(): ReactNode {
     setView(isNew || next.manifest.tokens.length === 0 ? 'add' : 'archive')
   }, [])
 
+  /*
+   * Opening a different archive replaces the whole window with the welcome
+   * screen. Settings and Help render *over* that screen, so a member sitting on
+   * one of them would be shown it again instead of the archive picker they just
+   * asked for.
+   */
+  const switchArchive = useCallback(() => {
+    setSwitching(true)
+    setView((current) => (current === 'settings' || current === 'help' ? 'archive' : current))
+  }, [])
+
+  const leaveStandalone = useCallback(() => {
+    setView('archive')
+  }, [])
+
   if (booting) {
     return (
       <div className="main-scroll">
@@ -209,12 +324,30 @@ export default function App(): ReactNode {
   }
 
   if (snapshot === null || switching) {
+    /*
+     * No archive — or one open that the member is replacing. Settings comes
+     * first because setting up an IPFS node before archiving anything is a
+     * perfectly reasonable order to work in, and until now the app made it
+     * impossible.
+     */
     return (
-      <div className="main-scroll">
-        <ChooseArchive
-          onOpened={opened}
-          onCancel={snapshot === null ? undefined : () => setSwitching(false)}
-        />
+      <div className="main-scroll" ref={scrollRef}>
+        {view === 'settings' ? (
+          <StandaloneScreen onBack={leaveStandalone}>
+            <PinningSettings />
+          </StandaloneScreen>
+        ) : view === 'help' ? (
+          <StandaloneScreen onBack={leaveStandalone}>
+            <Help />
+          </StandaloneScreen>
+        ) : (
+          <Welcome
+            onOpened={opened}
+            onOpenSettings={() => setView('settings')}
+            onOpenHelp={() => setView('help')}
+            onCancel={snapshot === null ? undefined : () => setSwitching(false)}
+          />
+        )}
       </div>
     )
   }
@@ -252,11 +385,18 @@ export default function App(): ReactNode {
         </nav>
 
         <nav className="nav nav-secondary" aria-label="App settings">
-          <NavButton entry={SETTINGS} current={view === SETTINGS.id} onSelect={setView} />
+          {SECONDARY_NAV.map((entry) => (
+            <NavButton
+              key={entry.id}
+              entry={entry}
+              current={view === entry.id}
+              onSelect={setView}
+            />
+          ))}
         </nav>
 
         <div className="sidebar-foot">
-          <button type="button" className="btn btn-sm" onClick={() => setSwitching(true)}>
+          <button type="button" className="btn btn-sm" onClick={switchArchive}>
             Open a different archive
           </button>
           <p className="small faint">
@@ -267,12 +407,9 @@ export default function App(): ReactNode {
       </aside>
 
       <main className="main">
-        <div className="main-scroll">
+        <div className="main-scroll" ref={scrollRef}>
           <div hidden={view !== 'add'}>
-            <AddTokensView
-              onAdded={() => setView('archive')}
-              onNeedArchive={() => setSwitching(true)}
-            />
+            <AddTokensView onAdded={() => setView('archive')} onNeedArchive={switchArchive} />
           </div>
           <div hidden={view !== 'archive'}>
             <ArchiveView
@@ -281,7 +418,30 @@ export default function App(): ReactNode {
               onAddTokens={() => setView('add')}
             />
           </div>
+          <div hidden={view !== 'gallery'}>
+            {/*
+              `active` is deliberately not passed. Every screen stays mounted
+              behind `hidden`, so the gallery loads itself the first time it is
+              actually looked at rather than reading 20,808 files' worth of
+              metadata on start-up for a member who never opens it.
+            */}
+            <GalleryView
+              snapshot={snapshot}
+              onAddTokens={() => setView('add')}
+              onCheckHealth={() => setView('health')}
+            />
+          </div>
           <div hidden={view !== 'assets'}>
+            {/*
+              The drift notice sits above Assets as well as on the welcome
+              screen. Assets is where a member goes to ask "is this content
+              safe?", and a stale copy of BIC's archive is exactly that question
+              — but they have no reason to return to the welcome screen once an
+              archive is open, so it has to be visible from inside the app too.
+            */}
+            <div className="view" style={{ marginBottom: 22 }}>
+              <DriftBanner />
+            </div>
             {/*
               `AssetsView` is written elsewhere and asks for one thing: the open
               archive. Everything else it shows — the rows, their health, their
@@ -323,6 +483,9 @@ export default function App(): ReactNode {
           <div hidden={view !== 'settings'}>
             <PinningSettings />
           </div>
+          <div hidden={view !== 'help'}>
+            <Help />
+          </div>
         </div>
 
         {/*
@@ -346,8 +509,9 @@ export default function App(): ReactNode {
  * Two reasons this is its own component rather than part of `App`. It keeps the
  * strip out of the way once a job is done, instead of leaving a panel of
  * finished rows wedged across the bottom of every screen; and `useProgress`
- * re-renders on every event a run produces, which must not drag four mounted
- * screens (one of them a long table) through a re-render with it.
+ * re-renders on every event a run produces, which must not drag the mounted
+ * screens (one of them a long table, another a grid of pictures) through a
+ * re-render with it.
  */
 function ActivityStrip(): ReactNode {
   const progress = useProgress()
@@ -355,181 +519,6 @@ function ActivityStrip(): ReactNode {
   return (
     <div className="activity">
       <ProgressList title="What's happening" />
-    </div>
-  )
-}
-
-/* ========================================================================== */
-/* First run                                                                  */
-/* ========================================================================== */
-
-/**
- * An archive is a folder on the member's own computer. Saying that plainly here
- * is the difference between "why is it asking me for a folder?" and knowing
- * where your backup actually lives.
- */
-function ChooseArchive({
-  onOpened,
-  onCancel
-}: {
-  onOpened: (snapshot: ArchiveSnapshot, isNew: boolean) => void
-  onCancel?: () => void
-}): ReactNode {
-  const archive = useArchive()
-  const [name, setName] = useState('')
-  const [problem, setProblem] = useState<string | null>(null)
-  const [working, setWorking] = useState(false)
-
-  /** The folder picker, with "the member closed it" told apart from a failure. */
-  const askForFolder = useCallback(async (title: string): Promise<string | null> => {
-    const chosen = await window.api.pickDirectory({ title })
-    if (!chosen.ok) {
-      setProblem(chosen.error)
-      return null
-    }
-    return chosen.value
-  }, [])
-
-  /*
-   * `archive.create` / `archive.open` publish to the store but only report
-   * success as a boolean, and the snapshot on this render's controller is the
-   * one from *before* the call. So the engine is called directly for the value
-   * and `archive.set` — a module-level function, never stale — publishes it.
-   */
-  const startNew = useCallback(async () => {
-    setProblem(null)
-    setWorking(true)
-    try {
-      const dir = await askForFolder('Choose an empty folder to keep this archive in')
-      if (dir === null) return
-      const created = await window.api.createArchive(
-        dir,
-        name.trim() === '' ? 'DAO archive' : name.trim()
-      )
-      if (!created.ok) {
-        setProblem(created.error)
-        return
-      }
-      archive.set(created.value)
-      onOpened(created.value, true)
-    } finally {
-      setWorking(false)
-    }
-  }, [archive, askForFolder, name, onOpened])
-
-  const openExisting = useCallback(async () => {
-    setProblem(null)
-    setWorking(true)
-    try {
-      const dir = await askForFolder('Choose an archive folder')
-      if (dir === null) return
-      const reopened = await window.api.openArchive(dir)
-      if (!reopened.ok) {
-        setProblem(reopened.error)
-        return
-      }
-      archive.set(reopened.value)
-      onOpened(reopened.value, false)
-    } finally {
-      setWorking(false)
-    }
-  }, [archive, askForFolder, onOpened])
-
-  return (
-    <div className="welcome">
-      <div>
-        <h1 className="welcome-title">BIC Archiver</h1>
-        <p className="welcome-lead">
-          Paste a contract address and this app reads the NFTs off the blockchain, downloads
-          everything they point at, and saves it as a backup that can be checked by anyone — no IPFS
-          software to install, no hashes to copy by hand.
-        </p>
-      </div>
-
-      {problem !== null && (
-        <Banner tone="danger" title="That did not work">
-          {problem}
-        </Banner>
-      )}
-
-      <div className="choice-grid">
-        <section className="choice choice-recommended">
-          <h2 className="choice-title">Start a new archive</h2>
-          <p className="choice-why">
-            An archive is just a folder on this computer. Everything downloaded is kept inside it,
-            so you can close the app and pick up where you left off.
-          </p>
-          <div className="field">
-            <label className="field-label" htmlFor="archive-name">
-              Give it a name
-            </label>
-            <input
-              id="archive-name"
-              className="input"
-              type="text"
-              value={name}
-              placeholder="DAO archive"
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !working) void startNew()
-              }}
-            />
-            <p className="field-hint">Used for the folder listing and the backup file name.</p>
-          </div>
-          <div className="choice-foot">
-            <button
-              type="button"
-              className="btn btn-primary btn-lg btn-block"
-              onClick={() => void startNew()}
-              disabled={working}
-            >
-              Choose an empty folder…
-            </button>
-          </div>
-        </section>
-
-        <section className="choice">
-          <h2 className="choice-title">Open an archive you made earlier</h2>
-          <p className="choice-why">
-            Point at the folder you used last time. Everything in it — the NFTs, the downloaded
-            files and the fingerprint — comes back exactly as you left it.
-          </p>
-          <div className="choice-foot">
-            <button
-              type="button"
-              className="btn btn-lg btn-block"
-              onClick={() => void openExisting()}
-              disabled={working}
-            >
-              Choose the folder…
-            </button>
-          </div>
-        </section>
-      </div>
-
-      {onCancel !== undefined && (
-        <div className="row">
-          <button type="button" className="btn" onClick={onCancel}>
-            Never mind — go back
-          </button>
-        </div>
-      )}
-
-      <Card title="What this app is doing for you">
-        <ul className="bullets">
-          <li>Reads the token's description straight from the contract, proxies and all.</li>
-          <li>
-            Decodes descriptions that are stored on the blockchain itself, instead of you pasting
-            them into a decoder.
-          </li>
-          <li>
-            Downloads every file in a way that keeps its original IPFS content ID — and, when the
-            content has to be rescued from an ordinary gateway, works the original ID out again and
-            tells you whether it matched.
-          </li>
-          <li>Warns you when content has fallen off the network, instead of failing silently.</li>
-        </ul>
-      </Card>
     </div>
   )
 }

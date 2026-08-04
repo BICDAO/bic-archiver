@@ -84,6 +84,13 @@ const FALLBACK_API: ArchiverApi = {
   runMirror: () => missing(),
   listGallery: () => missing(),
   galleryItem: () => missing(),
+  nodeStatus: () => missing(),
+  installNode: () => missing(),
+  startNode: () => missing(),
+  stopNode: () => missing(),
+  uninstallNode: () => missing(),
+  setAutostart: () => missing(),
+  checkDrift: () => missing(),
   pickDirectory: () => missing(),
   saveCar: () => missing(),
   openCar: () => missing(),
@@ -97,7 +104,8 @@ const FALLBACK_API: ArchiverApi = {
   onProgress: () => () => undefined,
   onHealth: () => () => undefined,
   onPinProgress: () => () => undefined,
-  onMirrorProgress: () => () => undefined
+  onMirrorProgress: () => () => undefined,
+  onNodeProgress: () => () => undefined
 }
 
 function looksLikeApi(candidate: unknown): candidate is ArchiverApi {
