@@ -4,10 +4,11 @@
  *
  * Three decisions here are worth knowing about:
  *
- *  • All four screens stay mounted once an archive is open, hidden rather than
+ *  • Every screen stays mounted once an archive is open, hidden rather than
  *    unmounted. Archiving 200 tokens takes a while, and a member who clicks
  *    "Health" half-way through must not come back to a screen that has
- *    forgotten the run was ever happening.
+ *    forgotten the run was ever happening. The same goes for a pin run started
+ *    from Assets: it keeps going while its screen is out of sight.
  *
  *  • The open archive comes from the shared store in `hooks.ts`, not from state
  *    kept here. Both halves of the window read it, so a token added on the Add
@@ -30,15 +31,17 @@ import { useArchive, useProgress } from './hooks'
 import { AddTokensView } from './components/AddTokensView'
 import { ProgressList } from './components/ProgressList'
 import ArchiveView from './components/ArchiveView'
+import AssetsView from './components/AssetsView'
 import ExportView from './components/ExportView'
 import HealthView from './components/HealthView'
+import PinningSettings from './components/PinningSettings'
 import { Banner, Card, formatCount } from './components/Layout'
 
 /* ========================================================================== */
 /* Navigation                                                                 */
 /* ========================================================================== */
 
-type ViewId = 'add' | 'archive' | 'health' | 'export'
+type ViewId = 'add' | 'archive' | 'assets' | 'health' | 'export' | 'settings'
 
 interface NavEntry {
   id: ViewId
@@ -76,6 +79,17 @@ const NAV: NavEntry[] = [
     )
   },
   {
+    id: 'assets',
+    label: 'Assets',
+    icon: (
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" {...stroke}>
+        <path d="M2.6 5.6 8 2.8l5.4 2.8L8 8.4 2.6 5.6Z" />
+        <path d="M2.6 8.9 8 11.7l5.4-2.8" />
+        <path d="M2.6 11.6 8 14.4l5.4-2.8" />
+      </svg>
+    )
+  },
+  {
     id: 'health',
     label: 'Health',
     icon: (
@@ -95,6 +109,51 @@ const NAV: NavEntry[] = [
     )
   }
 ]
+
+/**
+ * Settings sits apart from the rest, at the foot of the sidebar. It is not a
+ * step in the job — a member goes there once to say where content should be
+ * pinned, and then rarely again — so putting it in the run of screens would
+ * imply it is something you do every time.
+ */
+const SETTINGS: NavEntry = {
+  id: 'settings',
+  label: 'Settings',
+  icon: (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" {...stroke}>
+      <path d="M2.4 4.6h11.2M2.4 8h11.2M2.4 11.4h11.2" />
+      <circle cx="5.8" cy="4.6" r="1.5" />
+      <circle cx="10.2" cy="8" r="1.5" />
+      <circle cx="5.8" cy="11.4" r="1.5" />
+    </svg>
+  )
+}
+
+function NavButton({
+  entry,
+  current,
+  count,
+  onSelect
+}: {
+  entry: NavEntry
+  current: boolean
+  /** Shown as a badge when there is something worth counting. */
+  count?: number
+  onSelect: (id: ViewId) => void
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      className="nav-item"
+      aria-current={current ? 'page' : undefined}
+      onClick={() => onSelect(entry.id)}
+    >
+      <span className="nav-icon">{entry.icon}</span>
+      <span className="nav-label">{entry.label}</span>
+      {count !== undefined && <span className="nav-count">{formatCount(count)}</span>}
+    </button>
+  )
+}
 
 /* ========================================================================== */
 /* The shell                                                                  */
@@ -178,20 +237,22 @@ export default function App(): ReactNode {
 
         <nav className="nav" aria-label="Sections">
           {NAV.map((entry) => (
-            <button
+            <NavButton
               key={entry.id}
-              type="button"
-              className="nav-item"
-              aria-current={view === entry.id ? 'page' : undefined}
-              onClick={() => setView(entry.id)}
-            >
-              <span className="nav-icon">{entry.icon}</span>
-              <span className="nav-label">{entry.label}</span>
-              {entry.id === 'archive' && snapshot.manifest.tokens.length > 0 && (
-                <span className="nav-count">{formatCount(snapshot.manifest.tokens.length)}</span>
-              )}
-            </button>
+              entry={entry}
+              current={view === entry.id}
+              onSelect={setView}
+              count={
+                entry.id === 'archive' && snapshot.manifest.tokens.length > 0
+                  ? snapshot.manifest.tokens.length
+                  : undefined
+              }
+            />
           ))}
+        </nav>
+
+        <nav className="nav nav-secondary" aria-label="App settings">
+          <NavButton entry={SETTINGS} current={view === SETTINGS.id} onSelect={setView} />
         </nav>
 
         <div className="sidebar-foot">
@@ -220,11 +281,47 @@ export default function App(): ReactNode {
               onAddTokens={() => setView('add')}
             />
           </div>
+          <div hidden={view !== 'assets'}>
+            {/*
+              `AssetsView` is written elsewhere and asks for one thing: the open
+              archive. Everything else it shows — the rows, their health, their
+              pin state at each target — it gets from `pin:assets` itself,
+              because only the main process can tell that a row recorded as
+              `bafybei…` and a pin recorded as `Qm…` are the same content.
+
+              The three optional props are the shell's job, so they are all
+              passed. Without `onOpenSettings` its "nothing is set up to keep
+              this content" banner explains the problem and then offers no way
+              to fix it; and `onSnapshot` matters because assembling the archive
+              from that screen writes a new root that the sidebar count and the
+              Archive table would otherwise not hear about.
+            */}
+            <AssetsView
+              snapshot={snapshot}
+              onOpenSettings={() => setView('settings')}
+              onAddTokens={() => setView('add')}
+              onSnapshot={archive.set}
+            />
+          </div>
           <div hidden={view !== 'health'}>
             <HealthView snapshot={snapshot} onExport={() => setView('export')} />
           </div>
           <div hidden={view !== 'export'}>
-            <ExportView snapshot={snapshot} onSnapshot={archive.set} />
+            {/*
+              Export ends by telling the member that a .car is not a pin, and
+              that the fix is Settings first (node, key) and then Assets. Both
+              routes are handed over so that advice is a button rather than an
+              instruction to go and find something.
+            */}
+            <ExportView
+              snapshot={snapshot}
+              onSnapshot={archive.set}
+              onOpenAssets={() => setView('assets')}
+              onOpenSettings={() => setView('settings')}
+            />
+          </div>
+          <div hidden={view !== 'settings'}>
+            <PinningSettings />
           </div>
         </div>
 

@@ -310,6 +310,9 @@ Two things follow, and they shape the app:
    pins it. Health checks report availability, so an archive can be perfectly safe and
    still show every row red. That is not a bug, and the wording says so.
 
+Closing that gap is what section 6 is about. It is also why a pinning service alone
+cannot do it: re-adding has to happen on a machine that holds the bytes.
+
 This is still the case the failure paths are tuned against. The
 app warns within a few seconds (the routing lookup runs *concurrently* with the
 download attempt, so the member is not left staring at nothing for a minute) and fails
@@ -333,7 +336,101 @@ calls and then proven.
 
 ---
 
-## 6. Things that will bite you
+## 6. Pinning: why Kubo is load-bearing and `pinByHash` alone is not
+
+Full treatment in [`PINNING.md`](PINNING.md). The part that belongs here is the
+decision, and the measurement that forced it.
+
+### The measurement
+
+The May-2026 backup (1.8 GB, 10,762 unique CIDs) was swept with this app's own
+`checkMany`: **10,270 healthy, 64 at risk, 428 unreachable.** The 428 are 189 folders
+and 239 files, and they are not a random sample of the archive:
+
+| Population | Dead | Total | Rate |
+| --- | ---: | ---: | ---: |
+| Arweave-sourced assets BIC saved to IPFS | 55 | 57 | 96.5% |
+| Web2-sourced assets BIC saved to IPFS | 39 | 44 | 88.6% |
+| Native IPFS content others also pin | 151 | 20,707 | 0.7% |
+
+(Counted per archive entry, so the three do not sum to 428 unique CIDs.) Twelve NFTs
+have lost every file. The survival rate correlates with exactly one variable: whether
+anybody other than BIC had a reason to pin it. **The content this app rescues is, by
+construction, the content nobody else pins.**
+
+### Why pin-by-CID cannot fix it
+
+`POST /pinning/pinByHash` is a *retrieval* request: it hands Pinata a CID and asks it
+to find the content on the network. For the 428 there is nothing to find, so the job
+ends `expired` no matter how many times it is retried. A pinning service cannot read
+your disk, and the `.car` on your disk is the only remaining copy.
+
+This is the trap for a future maintainer. A pinning implementation built on
+`pinByHash` alone passes every test you would think to write — because tests use live
+CIDs — and fails on precisely the 4% the feature exists for.
+
+### The sequence
+
+1. `POST /api/v0/dag/import` (multipart) into a local Kubo node. Blocks land under
+   their **original** CIDs — nothing is re-chunked or re-hashed — so the node becomes a
+   real provider for them and starts announcing.
+2. `POST /api/v0/id` for the node's multiaddrs, filtered to what a stranger could
+   dial (`selectDialableAddrs` in `kubo.ts`: loopback always dropped; private ranges
+   dropped unless they are all there is, in which case they are kept *with a note*
+   that a cloud service will not reach them).
+3. `POST /pinning/pinByHash` with `pinataOptions.hostNodes` set to those multiaddrs.
+   That turns "search for this" into "fetch it from here". `hostNodes` is the
+   mechanism, not a tuning knob.
+4. Verify. `data/pinList?status=pinned` is the authority on whether a pin landed;
+   `pinning/pinJobs` is used to learn *why* one has not. With ≤50 jobs outstanding
+   each is queried individually every round, because that is how `expired` surfaces in
+   seconds rather than at the end of the wait. A job that disappears from the queue
+   without appearing in the pin list stays `queued` — never promoted to `pinned` on a
+   silence.
+
+### Consequences that are easy to get wrong
+
+- **`dag/import` pins the roots recursively.** So a naive per-CID loop after the
+  import reports every CID as *already pinned* — telling a member "5 skipped, 0
+  pinned" on the very run that rescued their archive. `runKubo` snapshots the pin set
+  *before* the import and diffs, so newly covered CIDs read as `pinned`.
+- **A CID is `pinned` only when every enabled target holds it.** Kubo-pinned +
+  Pinata-failed is `failed`, with the reason attached. Half a backup is the situation
+  this app exists to end.
+- **Pinata's pin list only ever returns the spelling the pin was created with.** Kubo's
+  `pin/ls` normalises v0/v1; Pinata does not. Every set lookup goes through `hasCid`,
+  which tries all spellings, or a 2023 `Qm…` pin recorded in a new archive as `bafy…`
+  is re-pinned on every run *and* reported as unpinned.
+- **The scratch CAR is written inside the archive folder, not `os.tmpdir()`.** `/tmp`
+  is a tmpfs on many Linux distributions, and streaming 1.8 GB through RAM takes the
+  machine down. `tmpdir()` remains a fallback for read-only media.
+- **With no dialable node, candidate CIDs get a routing lookup first** and only the
+  ones somebody still announces are sent to Pinata. Deliberately not a gateway probe:
+  a cache hit means a browser can load it, not that anyone announces it, so it cannot
+  help Pinata find anything. It is also the faster path.
+- **Never enumerate an archive by walking the blockstore.** A blockstore is keyed by
+  multihash, so `getAll()` returns every block as a *raw* CID and dag-pb folders come
+  back under the wrong codec. Walk the DAG (`buildAssetRows`) instead.
+
+### The token
+
+The Pinata JWT is a bearer credential and is treated as one: `safeStorage` only,
+never in `manifest.json`, the archive, a `.car`, a settings file or this repo; never
+across IPC (only `hasToken: boolean` goes to the renderer); never logged; and redacted
+from any error text — including Pinata's own echoed error bodies — *before* that text
+reaches the IPC sanitiser, so a leak cannot ride out through a log line. If
+`safeStorage` is unavailable the app says so and offers no plaintext fallback.
+
+### Not wired up
+
+`pinOnImport` persists and defaults to `true`, but `archive:addTokens` does not yet
+start a pin run when it finishes; pinning is currently the explicit **Assets ▸ Pin
+everything** action. Wiring it means calling `pinArchive` after the manifest save,
+inside the same `withArchiveLock`.
+
+---
+
+## 7. Things that will bite you
 
 - **Never let a network call be unbounded.** Every one has a deadline and a finite
   number of attempts, and the whole app's credibility rests on failing fast and
@@ -356,6 +453,13 @@ calls and then proven.
   non-technical member as-is. The IPC layer sanitises them, and that sanitiser has
   already eaten the flagship dead-backup diagnostic once by truncating it. If you add
   length limits, test them against that 770-character message.
+- **A pin is only as live as the daemon.** Kubo pins serve nobody while `ipfs daemon`
+  is stopped or the machine is asleep. Pairing the node with Pinata is not belt and
+  braces — the node is what makes dead content fetchable at all, and Pinata is what
+  keeps it fetchable at 3 a.m.
+- **Never claim a pin you have not seen.** "Pinata accepted the request" and "Pinata
+  holds the content" are different claims and only the second one is a backup. Any new
+  target must verify by reading back, not by trusting a 200.
 - **The renderer must stay inert.** If you find yourself importing `node:` anything,
   `electron`, an IPFS package, or `src/main/*` into a component, the build will stop
   you by name. That guard is not in the way — it is the security boundary.

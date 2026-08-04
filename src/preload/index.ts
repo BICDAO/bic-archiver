@@ -23,6 +23,13 @@ import type {
   TokenInputSpec,
   TokenRef
 } from '../shared/types'
+import type {
+  AssetRow,
+  PinProgress,
+  PinRunSummary,
+  PinTargetStatus,
+  PinningSettings
+} from '../shared/pinning'
 
 /* -------------------------------------------------------------------------- */
 /* Result contract                                                            */
@@ -107,6 +114,25 @@ export interface HealthCheckResult {
   cancelled: boolean
 }
 
+/**
+ * Acknowledgement that a credential change went through.
+ *
+ * Deliberately says nothing else. A "yes, that worked" is all the window needs,
+ * and any richer answer would be a place for the key to leak back out. Call
+ * `getSettings()` afterwards to see the resulting `pinata.hasToken`.
+ */
+export interface TokenResult {
+  ok: boolean
+}
+
+/** What one `.car` import put into the local Kubo node. */
+export interface KuboImportResult {
+  /** Root CIDs the backup declared, as strings. Empty for a rootless `.car`. */
+  roots: string[]
+  /** Blocks the node reports having taken in. */
+  blocks: number
+}
+
 /** Optional dressing for the native file/folder pickers. */
 export interface DialogOptions {
   title?: string
@@ -155,6 +181,64 @@ export interface ArchiverApi {
   /** `import:car` — read someone else's `.car` backup into this archive. */
   importCar(inPath: string, opId?: string): Promise<IpcResult<ImportCarResult>>
 
+  // --- pinning settings ----------------------------------------------------
+  /**
+   * `settings:get` — the member's pinning preferences.
+   *
+   * `pinata.hasToken` is a boolean and nothing more: the Pinata key itself never
+   * crosses this bridge, so the window can show "a key is saved" without ever
+   * holding one.
+   */
+  getSettings(): Promise<IpcResult<PinningSettings>>
+  /**
+   * `settings:save` — write the preferences and get back the stored result.
+   *
+   * Any `pinata.hasToken` you send is ignored; the value that comes back is the
+   * live answer from the system keychain.
+   */
+  saveSettings(settings: PinningSettings): Promise<IpcResult<PinningSettings>>
+  /**
+   * `settings:setPinataToken` — hand the Pinata key to the main process, which
+   * puts it straight into the operating system's keychain.
+   *
+   * This is the one value that travels *into* the main process and never comes
+   * back. Pass it straight from the input element and let it go: do not put it
+   * in component state, a store, a log line, or anywhere it could end up in a
+   * crash report. Fails with a plain-English explanation on a computer that has
+   * no secure place to keep a credential.
+   */
+  setPinataToken(token: string): Promise<IpcResult<TokenResult>>
+  /** `settings:clearPinataToken` — forget the saved key completely. */
+  clearPinataToken(): Promise<IpcResult<TokenResult>>
+
+  // --- pinning -------------------------------------------------------------
+  /**
+   * `pin:targets` — which pinning targets are usable right now, and if one is
+   * not, a plain-English reason a member can act on.
+   */
+  pinTargets(opId?: string): Promise<IpcResult<PinTargetStatus[]>>
+  /**
+   * `pin:assets` — one row per piece of content in the open archive, with its
+   * network health and its pin state at each target folded in.
+   */
+  pinAssets(opId?: string): Promise<IpcResult<AssetRow[]>>
+  /**
+   * `pin:all` — pin these specific CIDs; streams `pin-progress` events.
+   *
+   * Pass `carPath` when the content may no longer be on the public network. The
+   * backup is imported into the local Kubo node first, which makes that node a
+   * real provider for those CIDs — without it, asking Pinata to fetch content
+   * nobody hosts cannot work.
+   */
+  pinAll(cids: string[], carPath?: string, opId?: string): Promise<IpcResult<PinRunSummary>>
+  /** `pin:archive` — pin everything in the open archive; streams `pin-progress`. */
+  pinArchive(carPath?: string, opId?: string): Promise<IpcResult<PinRunSummary>>
+  /**
+   * `kubo:importCar` — load a `.car` backup into the local Kubo node, keeping
+   * every content ID exactly as it was. Streams `pin-progress` events.
+   */
+  kuboImportCar(carPath: string, opId?: string): Promise<IpcResult<KuboImportResult>>
+
   // --- native pickers ------------------------------------------------------
   /** `dialog:pickDirectory` — resolves to null when the member cancels. */
   pickDirectory(options?: DialogOptions): Promise<IpcResult<string | null>>
@@ -184,6 +268,8 @@ export interface ArchiverApi {
   onProgress(callback: (event: ProgressEvent) => void): () => void
   /** Subscribe to health rows. Returns an unsubscribe function. */
   onHealth(callback: (result: HealthResult) => void): () => void
+  /** Subscribe to pinning progress. Returns an unsubscribe function. */
+  onPinProgress(callback: (progress: PinProgress) => void): () => void
 }
 
 /* -------------------------------------------------------------------------- */
@@ -274,6 +360,19 @@ const api: ArchiverApi = {
   exportFolder: (outDir, opId) => call<ExportFolderResult>('export:folder', { outDir, opId }),
   importCar: (inPath, opId) => call<ImportCarResult>('import:car', { inPath, opId }),
 
+  getSettings: () => call<PinningSettings>('settings:get', {}),
+  saveSettings: (settings) => call<PinningSettings>('settings:save', { settings }),
+  // The key goes over as a plain argument and is never held here: `call` builds
+  // the payload inline, so nothing in this file keeps a reference to it.
+  setPinataToken: (token) => call<TokenResult>('settings:setPinataToken', { token }),
+  clearPinataToken: () => call<TokenResult>('settings:clearPinataToken', {}),
+
+  pinTargets: (opId) => call<PinTargetStatus[]>('pin:targets', { opId }),
+  pinAssets: (opId) => call<AssetRow[]>('pin:assets', { opId }),
+  pinAll: (cids, carPath, opId) => call<PinRunSummary>('pin:all', { cids, carPath, opId }),
+  pinArchive: (carPath, opId) => call<PinRunSummary>('pin:archive', { carPath, opId }),
+  kuboImportCar: (carPath, opId) => call<KuboImportResult>('kubo:importCar', { carPath, opId }),
+
   pickDirectory: (options) => call<string | null>('dialog:pickDirectory', options ?? {}),
   saveCar: (options) => call<string | null>('dialog:saveCar', options ?? {}),
   openCar: (options) => call<string | null>('dialog:openCar', options ?? {}),
@@ -285,7 +384,8 @@ const api: ArchiverApi = {
   newOperationId,
 
   onProgress: (callback) => subscribe<ProgressEvent>('progress', callback),
-  onHealth: (callback) => subscribe<HealthResult>('health', callback)
+  onHealth: (callback) => subscribe<HealthResult>('health', callback),
+  onPinProgress: (callback) => subscribe<PinProgress>('pin-progress', callback)
 }
 
 contextBridge.exposeInMainWorld('api', api)

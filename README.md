@@ -8,9 +8,12 @@ media actually live, downloads every file in a way that **preserves the original
 content ID**, records where each byte came from, and writes a single `.car` file that
 anyone can verify.
 
-No IPFS daemon. No IPFS Desktop. No Kubo. Nothing to install but the app itself.
+**Archiving needs no IPFS daemon** — no IPFS Desktop, no Kubo, nothing to install but
+the app itself. *Putting content back on IPFS* is a different job, and for that a local
+Kubo node is not optional; see [`docs/PINNING.md`](docs/PINNING.md) for why.
 
 - **Members** who just want to make a backup: [`docs/FOR-MEMBERS.md`](docs/FOR-MEMBERS.md)
+- **Keeping the content alive on IPFS**: [`docs/PINNING.md`](docs/PINNING.md)
 - **Whoever maintains this next**: [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md)
 
 ---
@@ -33,7 +36,7 @@ now unreachable and nobody noticed until someone went looking.
 
 | Manual step | Automated by | Where |
 | --- | --- | --- |
-| Install IPFS Desktop, wait for the daemon | Nothing — the app speaks the gateway HTTP protocols directly and keeps blocks in its own on-disk blockstore | `src/main/ipfs/blockstore.ts` |
+| Install IPFS Desktop, wait for the daemon | Nothing, to *archive* — the app speaks the gateway HTTP protocols directly and keeps blocks in its own on-disk blockstore. Putting content back on IPFS still needs a node, deliberately | `src/main/ipfs/blockstore.ts`, `src/main/pinning/kubo.ts` |
 | Open Etherscan, find the contract, click **Read as Proxy** | `eth_call` over public JSON-RPC; proxies are transparent to the EVM, so there is no proxy step | `src/main/chain/rpc.ts` |
 | Call `tokenURI(id)` / `uri(id)` and copy the result | `resolveTokenUri()`, hand-rolled ABI encode/decode, ERC-721 then ERC-1155 | `src/main/chain/tokenUri.ts` |
 | Paste a base64 `data:` blob into an online decoder | Decoded in-process, base64 **and** plain-percent-encoded `data:` URIs | `src/main/chain/tokenUri.ts` |
@@ -59,7 +62,9 @@ Three processes, one direction of trust.
 │   ipfs/       trustless CAR fetch · block verify · dag-pb · UnixFS import · CAR   │
 │   archive/    input parsing · orchestration · manifest store · provenance         │
 │   health/     delegated routing + gateway probes                                  │
-│   ipc.ts      18 channels, every one returning {ok:true,value} | {ok:false,error} │
+│   pinning/    Kubo RPC · Pinata REST · the import→hostNodes→verify sequence       │
+│   settings.ts settings file + the Pinata token, via safeStorage (OS keychain)     │
+│   ipc.ts      27 channels, every one returning {ok:true,value} | {ok:false,error} │
 └──────────────────────────────────┬────────────────────────────────────────────────┘
                                    │  contextBridge, sandboxed, CJS preload
 ┌──────────────────────────────────┴────────────────────────────────────────────────┐
@@ -83,6 +88,15 @@ request to a public gateway or a pure function over bytes:
 So the app has no daemon to start, no ports to open, no repo to migrate, and no
 version of Kubo to keep in step with. The cost is that it depends on public gateways
 being up — see [Limits](#limits-be-honest-about-these).
+
+**Where a daemon does become necessary.** Reading content off IPFS needs no node;
+*putting it back* does. A pinning service's pin-by-CID asks it to find the content on
+the network, which cannot work for content that is already gone — and 428 CIDs in the
+DAO's real backup are exactly that. The only thing that can revive them is a node that
+holds the blocks under their original CIDs and is dialable from the internet, which is
+why `src/main/pinning/` speaks the Kubo RPC and hands Pinata the node's multiaddrs as
+`hostNodes`. That node is the member's to run; the app never installs or supervises
+one. [`docs/PINNING.md`](docs/PINNING.md) has the whole argument.
 
 **Why the renderer is inert.** A DAO member is going to paste URLs from Discord into
 this app. The renderer cannot fetch them, cannot read the disk and cannot reach
@@ -110,12 +124,18 @@ is dropping `type` from `import type { … } from '../preload'`.
 | `src/main/archive/store.ts` | `ArchiveStore` — the archive folder, its `manifest.json` (atomic writes + `.bak`), its blockstore, and a lock so two jobs cannot fight. |
 | `src/main/archive/provenance.ts` | `buildProvenance`, `layoutPathFor`. Pure function of the token — no live clock, so folder CIDs are reproducible. |
 | `src/main/health/check.ts` | `checkHealth`, `checkMany`, `checkProviders`, `probeGateway`. Never throws; dead content resolves in seconds. |
-| `src/main/ipc.ts` | All 18 channels, cancellation, progress fan-out, plain-English error sanitising. |
+| `src/shared/pinning.ts` | The pinning contract: `PinState`, `PinTargetStatus`, `AssetRow`, `PinRunSummary`, `PinningSettings`, `KUBO_RPC`, `PINATA`. Its header comment is the design rationale. |
+| `src/main/pinning/kubo.ts` | `detectKubo`, `importCarToKubo`, `pinCid`, `listPins`. Streams the CAR over `node:http`; classifies multiaddrs into what a remote service could actually dial. |
+| `src/main/pinning/pinata.ts` | `testPinataAuth`, `pinByCid`, `pinJobResult`, `listPinnedCids`. Every returned string is redacted of anything token-shaped. |
+| `src/main/pinning/manager.ts` | `getTargets`, `pinAll`, `pinArchive`. The import → `hostNodes` → verify sequence, with progress and an exact failure count. |
+| `src/main/pinning/assets.ts` | `buildAssetRows`, `mergeHealth`, `mergePinStates`, `summarise`. Walks the DAG — never the blockstore, which is keyed by multihash and returns raw CIDs. |
+| `src/main/settings.ts` | Pinning settings on disk plus the Pinata token via `safeStorage`. The token never crosses IPC. |
+| `src/main/ipc.ts` | All 27 channels, cancellation, progress fan-out, plain-English error sanitising, token redaction. |
 | `src/main/index.ts` | Window, lifecycle, CSP, navigation hardening. |
 | `src/preload/index.ts` | The `window.api` bridge **and** the single source of truth for IPC types. Built as CJS — sandboxed preloads must be. |
 | `src/renderer/hooks.ts` | `useArchive`, `useProgress`, `useHealth`, `useAsyncAction`. One module-level store per concern via `useSyncExternalStore`. |
 | `src/renderer/App.tsx` | Shell, sidebar, first-run archive chooser, activity strip. |
-| `src/renderer/components/` | `AddTokensView`, `ArchiveView`, `HealthView`, `ExportView`, plus `Layout` primitives, `ProgressList`, `Cid`. |
+| `src/renderer/components/` | `AddTokensView`, `ArchiveView`, `AssetsView`, `HealthView`, `ExportView`, `PinningSettings`, plus `Layout` primitives, `ProgressList`, `Cid`. |
 
 ### What an archive looks like on disk
 
@@ -127,6 +147,10 @@ An archive is an ordinary folder the member picks. Nothing is hidden anywhere el
   manifest.json.bak    previous manifest; writes are atomic (tmp → fsync → rename)
   blocks/              blockstore-fs: the content itself, addressed by CID
   exports/             scratch space for exports
+  .pin-scratch-*/      transient: the CAR handed to Kubo during a pin run, removed
+                       afterwards. It lives here rather than in os.tmpdir() because
+                       /tmp is a tmpfs on many Linux distributions and a 1.8 GB
+                       backup streamed through RAM takes the machine down.
 ```
 
 And the folder tree the archive assembles (mirrors the layout the DAO already built
@@ -226,11 +250,17 @@ them up from secrets without any change to the build scripts.
   down, and they will eventually change. Token archiving is deliberately limited to
   three at a time for that reason. If a run gets slow or starts failing, suspect a
   429 before you suspect the code.
-- **No built-in pinning.** The app makes a `.car` file; it does not put anything back
-  on IPFS. Keeping content alive means uploading that file to a pinning service, and
-  the Export screen points at one (Storacha) without ever touching an account or a
-  payment. Adding real pinning means an API token per DAO, which is a product
-  decision, not a missing function.
+- **Pinning needs something outside the app.** The archiver alone makes a `.car` file;
+  it does not put content back on IPFS. The Assets screen does, but only with a local
+  Kubo node (`brew install kubo`, `ipfs daemon`) and/or a Pinata key, both of which the
+  member sets up themselves. Pinata's pin-by-CID *searches the network*, so it cannot
+  rescue content that is already gone — the node has to serve the bytes first and be
+  dialable from the internet. Behind a firewall that blocks inbound 4001, the rescue
+  half does not work and the app says so rather than pretending. See
+  [`docs/PINNING.md`](docs/PINNING.md).
+- **"Pin new content automatically" is stored but not yet acted on.** The setting
+  persists and defaults to on; `archive:addTokens` does not start a pin run when it
+  finishes. Pin explicitly from the Assets screen.
 - **No ENS resolution.** `feistydao.eth` is rejected with an explanation, not
   resolved. Paste the `0x…` address.
 - **Reconstruction is bounded.** Rescued files over 256 MB skip CID reconstruction
