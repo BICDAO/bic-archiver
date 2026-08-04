@@ -15,7 +15,14 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 
-import { cancelOperationsForWebContents, registerIpcHandlers, shutdownIpc } from './ipc'
+import { MEDIA_SCHEME } from '../shared/community'
+import { installMediaProtocol, registerMediaScheme } from './community/mediaProtocol'
+import {
+  cancelOperationsForWebContents,
+  currentArchiveStore,
+  registerIpcHandlers,
+  shutdownIpc
+} from './ipc'
 
 const mainDir = fileURLToPath(new URL('.', import.meta.url))
 
@@ -49,14 +56,46 @@ function installCrashGuards(): void {
 
 installCrashGuards()
 
+/**
+ * `bic-media://` has to be declared *before* the app is ready — Electron reads
+ * the privileged-scheme list once, during startup, and a later call silently does
+ * nothing. That is why this sits at module scope rather than inside
+ * `whenReady()`: get it wrong and every picture in the gallery is a broken image
+ * with no error to explain it.
+ *
+ * The handler that answers those requests is installed after ready, below.
+ */
+registerMediaScheme()
+
 /** electron-vite sets this while `npm run dev` is running. */
 const devServerUrl = process.env['ELECTRON_RENDERER_URL']
 const isDev = devServerUrl !== undefined && devServerUrl !== '' && !app.isPackaged
 
 /**
+ * The one scheme the window is allowed to load pictures and video from, besides
+ * its own bundle.
+ *
+ * The renderer has no filesystem and no Node, so it cannot read the archive's
+ * blockstore; the main process serves those bytes over `bic-media://` and the
+ * window just puts the URL in a `src`. Without this in `img-src` and `media-src`
+ * every thumbnail is blocked — silently, as a console message the member will
+ * never see.
+ *
+ * It is not remote. Requests on this scheme never leave the process: they are
+ * answered from blocks already on this disk, by the handler in
+ * `community/mediaProtocol.ts`, which serves nothing but a valid CID out of the
+ * open archive. Nothing else in either policy is relaxed to accommodate it — in
+ * particular `connect-src` is untouched, so the window still cannot `fetch()`
+ * anything, and the handler sets its own `default-src 'none'; sandbox` policy on
+ * every response so an SVG out of an NFT cannot run.
+ */
+const MEDIA_SRC = `${MEDIA_SCHEME}:`
+
+/**
  * Kept in step with the `<meta http-equiv="Content-Security-Policy">` tag that
- * `electron.vite.config.ts` writes into `src/renderer/index.html`. The meta tag
- * is what protects the packaged app (`file://` responses never reach
+ * `electron.vite.config.ts` writes into `src/renderer/index.html` — including
+ * `bic-media:` in `img-src` and `media-src`, which both policies need. The meta
+ * tag is what protects the packaged app (`file://` responses never reach
  * `webRequest`); this header covers the dev server, where Vite's client and
  * React Fast Refresh need inline scripts and a websocket.
  */
@@ -64,8 +103,8 @@ const DEV_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' data: blob:",
+  `img-src 'self' data: blob: ${MEDIA_SRC}`,
+  `media-src 'self' data: blob: ${MEDIA_SRC}`,
   "font-src 'self' data:",
   "connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*",
   "worker-src 'self' blob:",
@@ -79,8 +118,8 @@ const PROD_CSP = [
   "default-src 'none'",
   "script-src 'self' file:",
   "style-src 'self' file: 'unsafe-inline'",
-  "img-src 'self' file: data: blob:",
-  "media-src 'self' file: data: blob:",
+  `img-src 'self' file: data: blob: ${MEDIA_SRC}`,
+  `media-src 'self' file: data: blob: ${MEDIA_SRC}`,
   "font-src 'self' file: data:",
   "connect-src 'self' data: blob:",
   "worker-src 'self' blob:",
@@ -266,6 +305,13 @@ if (!app.requestSingleInstanceLock()) {
     app.setAppUserModelId('org.bic.archiver')
     installSessionPolicies()
     registerIpcHandlers()
+
+    // Serves the gallery's pictures and video over `bic-media://`, straight out
+    // of whichever archive is open. A getter rather than a store, so opening a
+    // different archive needs no re-registration and a request that arrives with
+    // none open is answered honestly instead of reading from a closed blockstore.
+    installMediaProtocol(currentArchiveStore)
+
     showWindow()
 
     // macOS keeps the app running with no windows; clicking the dock icon

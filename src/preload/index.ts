@@ -24,6 +24,12 @@ import type {
   TokenRef
 } from '../shared/types'
 import type {
+  GalleryItem,
+  MirrorCapability,
+  MirrorProgress,
+  MirrorResult
+} from '../shared/community'
+import type {
   AssetRow,
   PinProgress,
   PinRunSummary,
@@ -133,6 +139,29 @@ export interface KuboImportResult {
   blocks: number
 }
 
+/**
+ * Whether this machine is already keeping the shared BIC archive.
+ *
+ * Three questions asked independently, and a question that could not be asked is
+ * answered `false` / `0` rather than failing the call — a status panel has to be
+ * able to draw itself.
+ *
+ * `providers` is the one the DAO cares about: how many peers are announcing the
+ * archive to the network right now. While it is zero, the archive exists only in
+ * backups. Note that it is a fact about the *network*, not about this computer:
+ * a node behind a router nothing can dial can be pinning the archive perfectly
+ * and still announce it to nobody, so `pinnedLocally: true` with `providers: 0`
+ * is a real and common answer rather than a contradiction.
+ */
+export interface MirrorStatus {
+  /** This computer's own IPFS node is keeping the archive. */
+  pinnedLocally: boolean
+  /** Pinata's own pin list contains it — verified, not assumed. */
+  pinnedOnPinata: boolean
+  /** Peers announcing the archive to the network. */
+  providers: number
+}
+
 /** Optional dressing for the native file/folder pickers. */
 export interface DialogOptions {
   title?: string
@@ -239,6 +268,54 @@ export interface ArchiverApi {
    */
   kuboImportCar(carPath: string, opId?: string): Promise<IpcResult<KuboImportResult>>
 
+  // --- the shared BIC archive ----------------------------------------------
+  /**
+   * `mirror:status` — is this machine already keeping the shared archive, and is
+   * anyone serving it?
+   *
+   * Nothing to do with the archive the member has open; this is about the DAO's
+   * published backup, so it works with no archive open at all.
+   */
+  mirrorStatus(opId?: string): Promise<IpcResult<MirrorStatus>>
+  /**
+   * `mirror:capabilities` — what this computer can do for the archive: a local
+   * IPFS node, a Pinata account, or a cold copy on disk. `'cold-copy'` is always
+   * in the list; the other two appear only when they are genuinely reachable.
+   */
+  mirrorCapabilities(opId?: string): Promise<IpcResult<MirrorCapability[]>>
+  /**
+   * `mirror:run` — make another copy of the shared archive exist; streams
+   * `mirror-progress` events.
+   *
+   * The longest job in the app: 1.8 GB, and on a machine with no IPFS node that
+   * means downloading all of it. Pass an `opId` and offer a Stop button. Stopping
+   * keeps what has already been downloaded, so running it again carries on rather
+   * than starting over.
+   *
+   * `destDir` is optional — leave it out and the copy goes into a "BIC Archive
+   * Mirror" folder in Downloads. Read `result.nowServing` before telling anyone
+   * they are helping: it is true only when this machine now actually serves the
+   * content to other people, which a file on a disk does not.
+   */
+  runMirror(destDir?: string, opId?: string): Promise<IpcResult<MirrorResult>>
+
+  // --- gallery -------------------------------------------------------------
+  /**
+   * `gallery:list` — every NFT in the open archive, with its name, traits, the
+   * CIDs of its pieces and its network verdict.
+   *
+   * The pictures do not come back through here. Turn `item.imageCid` into a URL
+   * with `mediaUrl()` from `src/shared/community.ts` and put it straight in an
+   * `<img>` or `<video>` `src`; the main process serves the bytes out of the
+   * archive over that scheme.
+   */
+  listGallery(opId?: string): Promise<IpcResult<GalleryItem[]>>
+  /**
+   * `gallery:item` — one NFT by its folder name, for the detail panel. Resolves
+   * to `null` when the archive has no folder by that name.
+   */
+  galleryItem(folder: string, opId?: string): Promise<IpcResult<GalleryItem | null>>
+
   // --- native pickers ------------------------------------------------------
   /** `dialog:pickDirectory` — resolves to null when the member cancels. */
   pickDirectory(options?: DialogOptions): Promise<IpcResult<string | null>>
@@ -270,6 +347,8 @@ export interface ArchiverApi {
   onHealth(callback: (result: HealthResult) => void): () => void
   /** Subscribe to pinning progress. Returns an unsubscribe function. */
   onPinProgress(callback: (progress: PinProgress) => void): () => void
+  /** Subscribe to mirroring progress. Returns an unsubscribe function. */
+  onMirrorProgress(callback: (progress: MirrorProgress) => void): () => void
 }
 
 /* -------------------------------------------------------------------------- */
@@ -373,6 +452,13 @@ const api: ArchiverApi = {
   pinArchive: (carPath, opId) => call<PinRunSummary>('pin:archive', { carPath, opId }),
   kuboImportCar: (carPath, opId) => call<KuboImportResult>('kubo:importCar', { carPath, opId }),
 
+  mirrorStatus: (opId) => call<MirrorStatus>('mirror:status', { opId }),
+  mirrorCapabilities: (opId) => call<MirrorCapability[]>('mirror:capabilities', { opId }),
+  runMirror: (destDir, opId) => call<MirrorResult>('mirror:run', { destDir, opId }),
+
+  listGallery: (opId) => call<GalleryItem[]>('gallery:list', { opId }),
+  galleryItem: (folder, opId) => call<GalleryItem | null>('gallery:item', { folder, opId }),
+
   pickDirectory: (options) => call<string | null>('dialog:pickDirectory', options ?? {}),
   saveCar: (options) => call<string | null>('dialog:saveCar', options ?? {}),
   openCar: (options) => call<string | null>('dialog:openCar', options ?? {}),
@@ -385,7 +471,8 @@ const api: ArchiverApi = {
 
   onProgress: (callback) => subscribe<ProgressEvent>('progress', callback),
   onHealth: (callback) => subscribe<HealthResult>('health', callback),
-  onPinProgress: (callback) => subscribe<PinProgress>('pin-progress', callback)
+  onPinProgress: (callback) => subscribe<PinProgress>('pin-progress', callback),
+  onMirrorProgress: (callback) => subscribe<MirrorProgress>('mirror-progress', callback)
 }
 
 contextBridge.exposeInMainWorld('api', api)

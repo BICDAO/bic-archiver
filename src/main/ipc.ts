@@ -15,8 +15,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
-import { BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { CID } from 'multiformats/cid'
 
 import type {
@@ -27,6 +27,12 @@ import type {
   TokenInputSpec,
   TokenRef
 } from '../shared/types'
+import type {
+  GalleryItem,
+  MirrorCapability,
+  MirrorProgress,
+  MirrorResult
+} from '../shared/community'
 import { DEFAULT_PINNING_SETTINGS } from '../shared/pinning'
 import type {
   AssetRow,
@@ -47,6 +53,7 @@ import type {
   IpcResult,
   KuboImportResult,
   MergeExistingResult,
+  MirrorStatus,
   TokenResult
 } from '../preload/index'
 
@@ -110,6 +117,29 @@ import {
 } from './settings'
 
 /* ========================================================================== */
+/* COMMUNITY ENGINE BINDING                                                   */
+/* -------------------------------------------------------------------------- */
+/* The third engine: the one-click mirror and the gallery.                     */
+/*                                                                             */
+/* The mirror takes the same credential rule as the pinning block above — the  */
+/* Pinata key is read HERE, handed to `mirrorArchive` (main-process code) for  */
+/* the length of one call, and never returned to the window. `MirrorResult`    */
+/* carries only plain-English `summary` and `errors`, and both are put through */
+/* `redactSecrets` on the way out anyway (see `scrubMirrorResult`).            */
+/*                                                                             */
+/* The gallery is read-only: it walks the blocks the archive already has and   */
+/* touches neither the network nor the manifest.                               */
+/* ========================================================================== */
+
+import { buildGallery, mergeGalleryHealth } from './community/gallery'
+import {
+  checkMirrorStatus,
+  detectCapabilities,
+  mirrorArchive,
+  resolveArchiveRoot
+} from './community/mirror'
+
+/* ========================================================================== */
 /* Tunables                                                                   */
 /* ========================================================================== */
 
@@ -149,6 +179,15 @@ const MAX_PIN_CIDS = 25000
  * quit it — mid-import.
  */
 const KUBO_IMPORT_HEARTBEAT_MS = 2000
+
+/**
+ * Where a mirrored copy goes when the member has not chosen a folder.
+ *
+ * Its own folder rather than the Downloads root, because a mirror is not one
+ * file: the run keeps a hidden scratch folder alongside the `.car` so an
+ * interrupted 1.8 GB download resumes instead of starting over.
+ */
+const MIRROR_FOLDER_NAME = 'BIC Archive Mirror'
 
 const CANCELLED_MESSAGE = 'Stopped at your request.'
 
@@ -582,6 +621,107 @@ class PinProgressPump {
   }
 }
 
+/** The phases a mirror run is allowed to report; anything else is a bug. */
+const MIRROR_PHASES: ReadonlySet<string> = new Set<MirrorProgress['phase']>([
+  'checking',
+  'resolving',
+  'fetching',
+  'pinning',
+  'verifying',
+  'done',
+  'error'
+])
+
+function cleanMirrorProgress(progress: MirrorProgress): MirrorProgress {
+  const cleaned: MirrorProgress = {
+    // An unrecognised phase becomes 'fetching' rather than being dropped: the
+    // message still tells the member something, and a phase the GUI does not
+    // know how to draw would leave it stuck.
+    phase: MIRROR_PHASES.has(progress.phase) ? progress.phase : 'fetching',
+    // Redacted here as well as at the error boundary: this text is assembled
+    // from what a node and a pinning service said, and it goes to a screen.
+    message: typeof progress.message === 'string' ? redactSecrets(progress.message) : ''
+  }
+  if (typeof progress.progress === 'number' && Number.isFinite(progress.progress)) {
+    cleaned.progress = Math.min(1, Math.max(0, progress.progress))
+  }
+  if (typeof progress.bytesDone === 'number' && Number.isFinite(progress.bytesDone)) {
+    cleaned.bytesDone = Math.max(0, Math.round(progress.bytesDone))
+  }
+  if (typeof progress.bytesTotal === 'number' && Number.isFinite(progress.bytesTotal)) {
+    cleaned.bytesTotal = Math.max(0, Math.round(progress.bytesTotal))
+  }
+  return cleaned
+}
+
+/**
+ * The `mirror-progress` equivalent of {@link ProgressPump}.
+ *
+ * A mirror run is one job with one story, so there is nothing to key on and a
+ * single pending slot is enough: a newer message simply replaces the one that
+ * has not gone out yet. `done` and `error` are never held back — those are what
+ * the GUI uses to stop the bar moving.
+ */
+class MirrorProgressPump {
+  private pending: MirrorProgress | null = null
+  private lastSentAt = 0
+  private timer: NodeJS.Timeout | null = null
+  private disposed = false
+
+  constructor(private readonly sender: WebContents) {}
+
+  readonly push = (progress: MirrorProgress): void => {
+    if (this.disposed) return
+    const cleaned = cleanMirrorProgress(progress)
+    const terminal = cleaned.phase === 'done' || cleaned.phase === 'error'
+    const now = Date.now()
+
+    if (terminal || now - this.lastSentAt >= MIN_PROGRESS_INTERVAL_MS) {
+      this.pending = null
+      this.lastSentAt = now
+      this.emit(cleaned)
+      return
+    }
+
+    this.pending = cleaned
+    if (this.timer === null) {
+      this.timer = setTimeout(() => {
+        this.timer = null
+        this.flush()
+      }, MIN_PROGRESS_INTERVAL_MS)
+      this.timer.unref?.()
+    }
+  }
+
+  flush(): void {
+    const queued = this.pending
+    if (queued === null) return
+    this.pending = null
+    this.lastSentAt = Date.now()
+    this.emit(queued)
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.flush()
+    this.disposed = true
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.pending = null
+  }
+
+  private emit(progress: MirrorProgress): void {
+    if (this.sender.isDestroyed()) return
+    try {
+      this.sender.send('mirror-progress', progress)
+    } catch (err) {
+      console.error('[bic-archiver] could not deliver a mirroring update', err)
+    }
+  }
+}
+
 /* ========================================================================== */
 /* Operations + cancellation                                                  */
 /* ========================================================================== */
@@ -705,6 +845,36 @@ async function runPinOperation<T>(
   )
 }
 
+/**
+ * {@link runOperation} for the mirror, which streams `mirror-progress`.
+ *
+ * Same shape as {@link runPinOperation} and for the same reason: the channel is
+ * opened around the body only, so nothing else ever sends on it, and a cancelled
+ * run still flushes the last thing it had to say.
+ */
+async function runMirrorOperation<T>(
+  event: IpcMainInvokeEvent,
+  rawOpId: unknown,
+  label: string,
+  body: (ctx: RunContext, onMirrorProgress: (progress: MirrorProgress) => void) => Promise<T>,
+  cancelMessage?: string
+): Promise<T> {
+  return runOperation(
+    event,
+    rawOpId,
+    label,
+    async (ctx) => {
+      const pump = new MirrorProgressPump(event.sender)
+      try {
+        return await body(ctx, pump.push)
+      } finally {
+        pump.dispose()
+      }
+    },
+    cancelMessage
+  )
+}
+
 /** Stop one operation, every operation belonging to one window, or all of them. */
 function cancelOperations(filter: { opId?: string; webContentsId?: number }): number {
   let stopped = 0
@@ -740,6 +910,21 @@ function requireStore(): ArchiveStore {
       'No archive is open yet. Start a new archive, or open a folder you archived to earlier, and then try again.'
     )
   }
+  return store
+}
+
+/**
+ * The archive that is open right now, or null.
+ *
+ * Exported for exactly one caller: the `bic-media://` handler installed in
+ * `index.ts`, which serves the gallery's pictures straight out of the open
+ * archive's blockstore. It is deliberately a *getter* rather than the store
+ * itself — the handler outlives any one archive, and asking each time means
+ * closing one archive and opening another needs no re-registration, and a
+ * request that arrives in between is answered honestly instead of reading from a
+ * blockstore that has been closed underneath it.
+ */
+export function currentArchiveStore(): ArchiveStore | null {
   return store
 }
 
@@ -852,12 +1037,61 @@ function requireContents(manifest: ArchiveManifest): void {
   }
 }
 
+/* ========================================================================== */
+/* The gallery, remembered                                                    */
+/* ========================================================================== */
+
+/**
+ * The last gallery built, and which archive it describes.
+ *
+ * Reading one NFT means walking the backup folder, and the DAO's own archive has
+ * 274 of them — around a third of a second for a full pass. Rebuilding that for
+ * every tile a member clicks would make the gallery feel broken, so the result is
+ * kept.
+ *
+ * The key is the archive folder *and* its assembled root CID, which is what makes
+ * this safe: a UnixFS root changes the moment its contents do, and adding or
+ * removing a token clears the root outright (see `invalidateRoot`). So there is
+ * no sequence of events that leaves this holding a description of content the
+ * archive no longer has — a changed archive simply has a different key, and a
+ * changed *root* has no cache at all.
+ *
+ * One entry. Cleared when the archive closes, because a gallery of one archive
+ * says nothing about the next.
+ */
+let galleryCache: { key: string; items: GalleryItem[] } | null = null
+
+/** Null when the archive has no assembled root yet, i.e. nothing to key on. */
+function galleryCacheKey(open: ArchiveStore): string | null {
+  const root = asCidString(open.manifest.rootCid)
+  if (root === null || storeDir === null) return null
+  // A null byte cannot appear in either half, so this cannot collide.
+  return `${storeDir}\0${root}`
+}
+
+/**
+ * The gallery for the open archive, built if it has not been built already.
+ *
+ * Health verdicts are deliberately *not* folded in here: the cache holds what the
+ * blocks on this disk say, and what the network said is layered on afterwards by
+ * the caller, so a fresh health sweep shows up immediately without a rebuild.
+ */
+async function readGallery(open: ArchiveStore, signal: AbortSignal): Promise<GalleryItem[]> {
+  const key = galleryCacheKey(open)
+  if (key !== null && galleryCache !== null && galleryCache.key === key) return galleryCache.items
+
+  const items = await buildGallery(open, signal)
+  if (key !== null) galleryCache = { key, items }
+  return items
+}
+
 async function closeCurrentStore(): Promise<void> {
   const open = store
   store = null
   storeDir = null
   // Verdicts about one archive's content say nothing about the next one's.
   lastHealth.clear()
+  galleryCache = null
   if (open === null) return
   try {
     await open.close()
@@ -1251,6 +1485,53 @@ function readOptionalCarPath(payload: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'string' || value.trim() === '') return undefined
   return readPath(payload, 'carPath', 'The backup file to load')
+}
+
+/* ========================================================================== */
+/* Mirroring payloads                                                         */
+/* ========================================================================== */
+
+/**
+ * Where to put the member's copy of the BIC archive.
+ *
+ * `destDir` is optional on purpose: the whole point of the mirror is that it is
+ * one click, and a member who has not been asked where to save should still get
+ * a copy rather than an error. When they have chosen somewhere, that wins.
+ *
+ * The folder does not have to exist — the mirror creates it, and says so plainly
+ * if it cannot.
+ */
+function readMirrorDestination(payload: unknown): string {
+  const chosen = asRecord(payload)['destDir']
+  if (typeof chosen === 'string' && chosen.trim() !== '') {
+    return readPath(payload, 'destDir', 'The folder to keep your copy of the archive in')
+  }
+  return defaultMirrorDir()
+}
+
+/**
+ * Downloads, or the next best thing. Never the archive folder: a mirror is a
+ * second, independent copy of somebody else's backup, and dropping 1.8 GB of it
+ * inside the member's own archive would blur the two.
+ */
+function defaultMirrorDir(): string {
+  const base = appPath('downloads') ?? appPath('documents') ?? appPath('userData')
+  if (base === null) {
+    throw plain(
+      'This app could not work out where to save your copy. Choose a folder yourself and try again.'
+    )
+  }
+  return join(base, MIRROR_FOLDER_NAME)
+}
+
+/** `app.getPath` throws for a location the operating system does not define. */
+function appPath(name: 'downloads' | 'documents' | 'userData'): string | null {
+  try {
+    const dir = app.getPath(name)
+    return typeof dir === 'string' && dir.trim() !== '' ? dir : null
+  } catch {
+    return null
+  }
 }
 
 /* ========================================================================== */
@@ -2005,6 +2286,151 @@ export function registerIpcHandlers(): void {
   )
 
   /* ---------------------------------------------------------------------- */
+  /* The shared BIC archive: mirroring                                      */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Is this machine already holding the shared archive, and is anyone serving it?
+   *
+   * Read-only and independent of the open archive — mirroring is about the DAO's
+   * published backup, not about whatever the member happens to have open — so it
+   * needs no archive and takes no lock. Never fails because a target is down: the
+   * engine answers `false` / `0` for a question it could not ask, so the panel can
+   * always draw itself.
+   */
+  handle<MirrorStatus>(
+    'mirror:status',
+    'checking whether you already have a copy of the BIC archive',
+    async (event, payload) =>
+      runOperation(event, asRecord(payload)['opId'], 'checking the shared archive', async (ctx) =>
+        withoutSecrets(async () => {
+          const settings = await loadSettings()
+          // Read here, for this one call, and handed no further than the mirror
+          // engine, which is main-process code. Never returned to the window.
+          const token = await getPinataToken()
+          // The published pointer first, so a member who has already mirrored the
+          // *current* archive is not told they are missing it.
+          const archive = await resolveArchiveRoot(ctx.signal)
+          return checkMirrorStatus(archive.cid, settings, token, ctx.signal)
+        })
+      )
+  )
+
+  /**
+   * What this computer can actually do for the archive.
+   *
+   * A question about the machine, not about the member's routine pinning
+   * preferences: a reachable node counts even with automatic pinning switched
+   * off, because pressing Mirror is an explicit, one-off request. `cold-copy` is
+   * always in the list — there is always a disk.
+   */
+  handle<MirrorCapability[]>(
+    'mirror:capabilities',
+    'checking what this computer can do for the archive',
+    async (event, payload) =>
+      runOperation(event, asRecord(payload)['opId'], 'checking your mirroring setup', async (ctx) =>
+        withoutSecrets(async () => {
+          const settings = await loadSettings()
+          const token = await getPinataToken()
+          return detectCapabilities(settings, token, ctx.signal)
+        })
+      )
+  )
+
+  /**
+   * Make another copy of the BIC archive exist in the world.
+   *
+   * Streams `mirror-progress` throughout, because this is the longest thing the
+   * app does: 1.8 GB, and on a machine with no node that is a download and a
+   * `.car` write. Cancellation is honoured at every step and leaves a partly
+   * finished download in place, so pressing Mirror again resumes rather than
+   * starting over — which is why the Stop wording says so.
+   *
+   * Not behind the archive lock: the mirror never touches the member's own
+   * archive or its manifest. It works in its own destination folder, with its own
+   * scratch blockstore.
+   */
+  handle<MirrorResult>('mirror:run', 'making your copy of the BIC archive', async (event, payload) => {
+    const destDir = readMirrorDestination(payload)
+
+    return runMirrorOperation(
+      event,
+      asRecord(payload)['opId'],
+      'making a copy of the BIC archive',
+      async (ctx, onMirrorProgress) =>
+        withoutSecrets(async () => {
+          const settings = await loadSettings()
+          const token = await getPinataToken()
+
+          const result = scrubMirrorResult(
+            await mirrorArchive({
+              settings,
+              token,
+              destDir,
+              onProgress: onMirrorProgress,
+              signal: ctx.signal
+            })
+          )
+
+          // Approved even when the run failed part-way: a half-finished download
+          // is exactly the thing a member may want to look at or delete, and this
+          // is the only way "show me where it saved" can reach it.
+          approvePath(destDir)
+          return result
+        }),
+      `${CANCELLED_MESSAGE} Everything downloaded before you stopped has been kept, so starting again will carry on from there.`
+    )
+  })
+
+  /* ---------------------------------------------------------------------- */
+  /* The shared BIC archive: gallery                                        */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Every NFT in the open archive, as the gallery shows it.
+   *
+   * Read-only, so deliberately not behind the archive lock — a member should be
+   * able to look through the collection while something else is running. The
+   * pictures themselves do not come back through here: each item carries the CIDs
+   * of its pieces, and the window asks for the bytes over `bic-media://`, which
+   * is served straight from the blockstore.
+   *
+   * This session's health verdicts are folded in here rather than baked into the
+   * cached gallery, so a health sweep shows up in the tiles straight away.
+   */
+  handle<GalleryItem[]>('gallery:list', 'opening the gallery', async (event, payload) => {
+    const open = requireStore()
+
+    return runOperation(event, asRecord(payload)['opId'], 'opening the gallery', async (ctx) => {
+      const items = await readGallery(open, ctx.signal)
+      ctx.throwIfCancelled()
+      return mergeGalleryHealth(items, [...lastHealth.values()])
+    })
+  })
+
+  /**
+   * One NFT, for the detail panel.
+   *
+   * `null` — not an error — when the archive has no folder by that name: a member
+   * whose gallery is a few seconds out of date should see an empty panel, not a
+   * failure they cannot act on.
+   */
+  handle<GalleryItem | null>('gallery:item', 'opening that item', async (event, payload) => {
+    const open = requireStore()
+    const folder = readString(payload, 'folder', 'Which item to open')
+
+    return runOperation(event, asRecord(payload)['opId'], 'opening an item', async (ctx) => {
+      const items = await readGallery(open, ctx.signal)
+      ctx.throwIfCancelled()
+
+      const match = items.find((item) => item.folder === folder)
+      if (match === undefined) return null
+      const [merged] = mergeGalleryHealth([match], [...lastHealth.values()])
+      return merged ?? match
+    })
+  })
+
+  /* ---------------------------------------------------------------------- */
   /* Native pickers                                                         */
   /* ---------------------------------------------------------------------- */
 
@@ -2180,6 +2606,21 @@ function scrubSummary(summary: PinRunSummary): PinRunSummary {
     failures: summary.failures.map((failure) =>
       failure.error === undefined ? failure : { ...failure, error: redactSecrets(failure.error) }
     )
+  }
+}
+
+/**
+ * The same treatment for the mirror's two pieces of prose.
+ *
+ * `summary` and `errors` are the only free text a mirror run produces, and both
+ * are built partly from what a node or Pinata said back. The engine never puts
+ * the key in them; this makes sure of it.
+ */
+function scrubMirrorResult(result: MirrorResult): MirrorResult {
+  return {
+    ...result,
+    summary: redactSecrets(result.summary),
+    errors: result.errors.map((message) => redactSecrets(message))
   }
 }
 

@@ -29,8 +29,26 @@ export type {
   IpcResult,
   KuboImportResult,
   MergeExistingResult,
+  MirrorStatus,
   TokenResult
 } from './index'
+
+/**
+ * The mirror and gallery shapes come from `src/shared/community.ts`, re-exported
+ * for the same reason as the pinning ones below: a component can name them
+ * without reaching into `src/main`.
+ *
+ * `mediaUrl()` and `MEDIA_SCHEME` are *values*, so they are not here — import
+ * them from `../shared/community` directly. That file holds no engine code and
+ * is safe in the window bundle.
+ */
+export type {
+  GalleryItem,
+  GallerySummary,
+  MirrorCapability,
+  MirrorProgress,
+  MirrorResult
+} from '../shared/community'
 
 /**
  * The pinning shapes come from `src/shared/pinning.ts` and are re-exported here

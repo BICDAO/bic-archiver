@@ -79,6 +79,11 @@ const FALLBACK_API: ArchiverApi = {
   pinAll: () => missing(),
   pinArchive: () => missing(),
   kuboImportCar: () => missing(),
+  mirrorStatus: () => missing(),
+  mirrorCapabilities: () => missing(),
+  runMirror: () => missing(),
+  listGallery: () => missing(),
+  galleryItem: () => missing(),
   pickDirectory: () => missing(),
   saveCar: () => missing(),
   openCar: () => missing(),
@@ -91,7 +96,8 @@ const FALLBACK_API: ArchiverApi = {
   },
   onProgress: () => () => undefined,
   onHealth: () => () => undefined,
-  onPinProgress: () => () => undefined
+  onPinProgress: () => () => undefined,
+  onMirrorProgress: () => () => undefined
 }
 
 function looksLikeApi(candidate: unknown): candidate is ArchiverApi {
