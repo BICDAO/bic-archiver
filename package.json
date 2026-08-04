@@ -1,6 +1,6 @@
 {
   "name": "bic-archiver",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Desktop app for archiving NFT metadata and media to verifiable IPFS .car backups",
   "main": "./out/main/index.js",
   "author": "BIC",
