@@ -50,8 +50,12 @@
     "productName": "BIC Archiver",
     "directories": { "output": "release" },
     "files": ["out/**/*", "resources/**/*"],
-    "mac": { "target": ["dmg"], "category": "public.app-category.utilities" },
-    "win": { "target": ["nsis"] },
-    "linux": { "target": ["AppImage"], "category": "Utility" }
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.utilities",
+      "icon": "resources/icon.icns"
+    },
+    "win": { "target": ["nsis"], "icon": "resources/icon.png" },
+    "linux": { "target": ["AppImage"], "category": "Utility", "icon": "resources/icon.png" }
   }
 }
