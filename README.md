@@ -1,5 +1,7 @@
 # BIC Archiver
 
+https://www.virustotal.com/gui/file/57d22df0f6bf7ebe27ee8618d827e4bb0073d0ffea5e2cde280f9893c50bf739
+
 A desktop app that turns an NFT contract address into a verifiable IPFS backup.
 
 Paste an OpenSea link, an Etherscan link, or just a contract address and some token
