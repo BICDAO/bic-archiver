@@ -12,10 +12,15 @@ import { defineConfig } from 'vitest/config'
  *
  * Live tests live in `test/live/` and are deliberately unreachable from this config —
  * they run only via `npm run test:live` (see vitest.live.config.ts).
+ *
+ * `test/pinning/` is included here on purpose. It is offline (it stubs `fetch` and
+ * binds its one real HTTP server to 127.0.0.1), so it belongs in the suite CI runs
+ * — and it is the only coverage the pinning engine has. It carries its own config
+ * as well, for running that subset alone; the two must agree.
  */
 export default defineConfig({
   test: {
-    include: ['test/*.test.ts'],
+    include: ['test/*.test.ts', 'test/pinning/*.test.ts'],
     exclude: ['test/live/**', 'node_modules/**', 'out/**', 'release/**'],
     environment: 'node',
     setupFiles: ['test/setup/no-network.ts'],

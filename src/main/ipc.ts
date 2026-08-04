@@ -27,6 +27,14 @@ import type {
   TokenInputSpec,
   TokenRef
 } from '../shared/types'
+import { DEFAULT_PINNING_SETTINGS } from '../shared/pinning'
+import type {
+  AssetRow,
+  PinProgress,
+  PinRunSummary,
+  PinTargetStatus,
+  PinningSettings
+} from '../shared/pinning'
 import type {
   AddTokensResult,
   ArchiveSnapshot,
@@ -37,7 +45,9 @@ import type {
   HealthCheckResult,
   ImportCarResult,
   IpcResult,
-  MergeExistingResult
+  KuboImportResult,
+  MergeExistingResult,
+  TokenResult
 } from '../preload/index'
 
 /* ========================================================================== */
@@ -73,6 +83,33 @@ interface EngineRunOptions {
 }
 
 /* ========================================================================== */
+/* PINNING ENGINE BINDING                                                     */
+/* -------------------------------------------------------------------------- */
+/* The second engine this file talks to, kept in its own block for the same    */
+/* reason as the first: one place to reconcile if a signature moves.           */
+/*                                                                             */
+/* One rule governs everything below. The Pinata key is read HERE, in the main */
+/* process, from the settings store — never passed in from the window, never   */
+/* returned to it, never logged. `settings:get` hands the window a             */
+/* `PinningSettings` whose `pinata.hasToken` is a boolean and whose object is  */
+/* rebuilt field by field on the way out (see `safeSettings`), so there is no  */
+/* path by which the credential can ride along with something else.            */
+/* ========================================================================== */
+
+import { buildAssetRows, mergeHealth, mergePinStates } from './pinning/assets'
+import { importCarToKubo, listPins } from './pinning/kubo'
+import { getTargets, pinAll, pinArchive } from './pinning/manager'
+import { listPinnedCids } from './pinning/pinata'
+import {
+  clearPinataToken,
+  getPinataToken,
+  loadSettings,
+  redactSecrets,
+  saveSettings,
+  setPinataToken
+} from './settings'
+
+/* ========================================================================== */
 /* Tunables                                                                   */
 /* ========================================================================== */
 
@@ -93,6 +130,25 @@ const MAX_TOKENS_PER_RUN = 1000
 
 /** A ceiling on one health sweep, for the same reason. */
 const MAX_HEALTH_ITEMS = 5000
+
+/**
+ * A ceiling on one pin run. Set well above real life on purpose: the DAO's own
+ * May-2026 backup holds 10,762 unique CIDs and pinning all of them in one go is
+ * the *intended* use of this app, not an accident to be guarded against. What
+ * this stops is a malformed list — a renderer bug, a pasted file — turning into
+ * an unbounded queue of network calls.
+ */
+const MAX_PIN_CIDS = 25000
+
+/**
+ * How often a long import repeats itself while it has nothing new to say.
+ *
+ * Kubo's `dag/import` streams no progress until it is finished, and a 1.8 GB
+ * archive legitimately takes minutes. Without a heartbeat the window would sit
+ * in silence long enough for a member to conclude the app had died and force
+ * quit it — mid-import.
+ */
+const KUBO_IMPORT_HEARTBEAT_MS = 2000
 
 const CANCELLED_MESSAGE = 'Stopped at your request.'
 
@@ -206,6 +262,44 @@ function toPlainMessage(err: unknown, action: string): string {
   }
 
   return `Something went wrong while ${action}. Please try again — and if it keeps happening, note what you were doing and tell the team.`
+}
+
+/**
+ * Strip anything token-shaped out of a failure before anyone can see it.
+ *
+ * `toPlainMessage` both logs the error and can pass its message through to the
+ * window, so scrubbing has to happen *before* it — hence a wrapper around the
+ * handler body rather than a filter on the way out.
+ *
+ * Nothing in this file ever puts the Pinata key into a message in the first
+ * place. This is the net under that: `fetch`, `undici` and Pinata itself all
+ * echo request headers or URLs back in their error text, and a member pasting an
+ * error into a support chat must not be pasting the DAO's credential with it.
+ * The redaction rules live in `settings.ts`, next to the store that owns the key.
+ */
+async function withoutSecrets<T>(body: () => Promise<T>): Promise<T> {
+  try {
+    return await body()
+  } catch (err) {
+    throw scrub(err)
+  }
+}
+
+function scrub(err: unknown): unknown {
+  if (typeof err === 'string') return redactSecrets(err)
+  if (!(err instanceof Error)) return err
+
+  const cleaned = redactSecrets(err.message)
+  // Rebuilt only when something was actually removed, so an ordinary failure
+  // keeps its identity — `code` for the filesystem messages, `name` for the
+  // cancellation check — and only a compromised message loses its stack.
+  if (cleaned === err.message) return err
+
+  const replacement = new Error(cleaned)
+  replacement.name = err.name
+  const code = (err as NodeJS.ErrnoException).code
+  if (typeof code === 'string') (replacement as NodeJS.ErrnoException).code = code
+  return replacement
 }
 
 /* ========================================================================== */
@@ -352,12 +446,139 @@ class ProgressPump {
   }
 }
 
+/**
+ * The most recent verdict for each CID this session has checked.
+ *
+ * Kept so `pin:assets` can hand the window rows that already carry their network
+ * state. The matching *has* to happen here rather than in the GUI: the archive
+ * may record a CID as `bafybei…` while the health run reported `Qm…`, and only
+ * `mergeHealth` knows those are the same thing. A renderer comparing strings
+ * would quietly show checked content as unchecked.
+ *
+ * Bounded, and cleared when the archive changes, because verdicts about one
+ * archive say nothing about the next.
+ */
+const lastHealth = new Map<string, HealthResult>()
+const MAX_REMEMBERED_HEALTH = 20000
+
+function rememberHealth(result: HealthResult): void {
+  // Re-inserted rather than overwritten so the map stays in "oldest first"
+  // order, which is what makes the eviction below drop the right entry.
+  lastHealth.delete(result.cid)
+  lastHealth.set(result.cid, result)
+  while (lastHealth.size > MAX_REMEMBERED_HEALTH) {
+    const oldest = lastHealth.keys().next()
+    if (oldest.done === true) break
+    lastHealth.delete(oldest.value)
+  }
+}
+
 function sendHealth(sender: WebContents, result: HealthResult): void {
   if (sender.isDestroyed()) return
   try {
     sender.send('health', toSerializable(result))
   } catch (err) {
     console.error('[bic-archiver] could not deliver a health result', err)
+  }
+}
+
+/**
+ * The CID field of a `PinProgress` that is not about one CID yet.
+ *
+ * Loading a `.car` into the node is a single job over a whole file, and the
+ * content IDs inside it are not known until the node has read it — so the events
+ * during that phase carry an empty `cid` and say what is happening in `message`.
+ * Once the roots are known the events name them.
+ */
+const NO_CID_YET = ''
+
+function cleanPinProgress(progress: PinProgress): PinProgress {
+  const cleaned: PinProgress = {
+    cid: typeof progress.cid === 'string' ? progress.cid.trim() : NO_CID_YET,
+    target: progress.target,
+    phase: progress.phase,
+    // Redacted here as well as at the error boundary, because this text is
+    // built from whatever a pinning service said and goes straight to a screen.
+    message: typeof progress.message === 'string' ? redactSecrets(progress.message) : ''
+  }
+  if (typeof progress.progress === 'number' && Number.isFinite(progress.progress)) {
+    cleaned.progress = Math.min(1, Math.max(0, progress.progress))
+  }
+  return cleaned
+}
+
+/**
+ * The `pin-progress` equivalent of {@link ProgressPump}, coalescing per
+ * target *and* CID — the same CID is legitimately in flight at Kubo and at
+ * Pinata at once, and collapsing those two into one row would make a run look
+ * half-finished. `done` and `error` always go out immediately; they are what the
+ * GUI uses to close a row out.
+ */
+class PinProgressPump {
+  private readonly pending = new Map<string, PinProgress>()
+  private readonly lastSentAt = new Map<string, number>()
+  private timer: NodeJS.Timeout | null = null
+  private disposed = false
+
+  constructor(private readonly sender: WebContents) {}
+
+  readonly push = (progress: PinProgress): void => {
+    if (this.disposed) return
+    const cleaned = cleanPinProgress(progress)
+    // A space cannot appear in either half — the target is one of two fixed
+    // words and a CID is base-encoded — so this cannot collide.
+    const key = `${cleaned.target} ${cleaned.cid}`
+    const terminal = cleaned.phase === 'done' || cleaned.phase === 'error'
+    const now = Date.now()
+    const last = this.lastSentAt.get(key) ?? 0
+
+    if (terminal || now - last >= MIN_PROGRESS_INTERVAL_MS) {
+      this.pending.delete(key)
+      this.lastSentAt.set(key, now)
+      this.emit(cleaned)
+      return
+    }
+
+    this.pending.set(key, cleaned)
+    if (this.timer === null) {
+      this.timer = setTimeout(() => {
+        this.timer = null
+        this.flush()
+      }, MIN_PROGRESS_INTERVAL_MS)
+      this.timer.unref?.()
+    }
+  }
+
+  flush(): void {
+    if (this.pending.size === 0) return
+    const now = Date.now()
+    const queued = [...this.pending.entries()]
+    this.pending.clear()
+    for (const [key, progress] of queued) {
+      this.lastSentAt.set(key, now)
+      this.emit(progress)
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.flush()
+    this.disposed = true
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.pending.clear()
+    this.lastSentAt.clear()
+  }
+
+  private emit(progress: PinProgress): void {
+    if (this.sender.isDestroyed()) return
+    try {
+      this.sender.send('pin-progress', progress)
+    } catch (err) {
+      console.error('[bic-archiver] could not deliver a pinning update', err)
+    }
   }
 }
 
@@ -452,6 +673,36 @@ async function runOperation<T>(
     pump.dispose()
     operations.delete(id)
   }
+}
+
+/**
+ * {@link runOperation} for a job that also streams `pin-progress`.
+ *
+ * The pin pump is created and torn down around the body rather than inside
+ * `runOperation`, so an archiving job never opens a pinning channel it has no
+ * use for, and a cancelled pin run still flushes whatever it had queued.
+ */
+async function runPinOperation<T>(
+  event: IpcMainInvokeEvent,
+  rawOpId: unknown,
+  label: string,
+  body: (ctx: RunContext, onPinProgress: (progress: PinProgress) => void) => Promise<T>,
+  cancelMessage?: string
+): Promise<T> {
+  return runOperation(
+    event,
+    rawOpId,
+    label,
+    async (ctx) => {
+      const pump = new PinProgressPump(event.sender)
+      try {
+        return await body(ctx, pump.push)
+      } finally {
+        pump.dispose()
+      }
+    },
+    cancelMessage
+  )
 }
 
 /** Stop one operation, every operation belonging to one window, or all of them. */
@@ -605,6 +856,8 @@ async function closeCurrentStore(): Promise<void> {
   const open = store
   store = null
   storeDir = null
+  // Verdicts about one archive's content say nothing about the next one's.
+  lastHealth.clear()
   if (open === null) return
   try {
     await open.close()
@@ -782,6 +1035,222 @@ function expandSpecs(specs: TokenInputSpec[]): TokenRef[] {
     )
   }
   return refs
+}
+
+/* ========================================================================== */
+/* Pinning payloads                                                           */
+/* ========================================================================== */
+
+/**
+ * Rebuild the settings object, field by field, on its way to the window.
+ *
+ * This is the security boundary for the Pinata key, and it is an allow-list on
+ * purpose. `PinningSettings` has no field for a credential today, but a copy of
+ * whatever the store handed back would carry any field a future change added —
+ * so nothing crosses IPC unless it is named here. `pinata.hasToken` is a
+ * boolean; the key stays in the keychain.
+ */
+function safeSettings(settings: PinningSettings): PinningSettings {
+  const safe: PinningSettings = {
+    kubo: {
+      enabled: settings.kubo.enabled === true,
+      apiUrl:
+        typeof settings.kubo.apiUrl === 'string' && settings.kubo.apiUrl.trim() !== ''
+          ? settings.kubo.apiUrl.trim()
+          : DEFAULT_PINNING_SETTINGS.kubo.apiUrl
+    },
+    pinata: {
+      enabled: settings.pinata.enabled === true,
+      hasToken: settings.pinata.hasToken === true
+    },
+    pinOnImport: settings.pinOnImport === true
+  }
+  if (typeof settings.pinata.gateway === 'string' && settings.pinata.gateway.trim() !== '') {
+    safe.pinata.gateway = settings.pinata.gateway.trim()
+  }
+  return safe
+}
+
+/**
+ * An http(s) address, or a plain-English complaint with an example in it.
+ *
+ * The store silently drops an address it cannot use and falls back to the
+ * default, which is the right thing for a hand-edited file on disk but the wrong
+ * thing for something a member just typed: they would press Save, see no error,
+ * and find their setting had reverted.
+ */
+function readAddress(value: unknown, complaint: string): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw plain(complaint)
+  const text = value.trim()
+  if (text === '') return undefined
+
+  let parsed: URL
+  try {
+    parsed = new URL(text)
+  } catch {
+    throw plain(complaint)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw plain(complaint)
+  // Every caller appends `/api/v0/…` or a path of its own.
+  return text.replace(/\/+$/, '')
+}
+
+function readFlag(record: Record<string, unknown>, field: string, fallback: boolean): boolean {
+  const value = record[field]
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') {
+    throw plain('Those settings could not be read. Close the settings window, reopen it, and try again.')
+  }
+  return value
+}
+
+/**
+ * Read the settings the window is asking to save.
+ *
+ * Built field by field for the same reason as {@link safeSettings}, in the other
+ * direction: whatever else is hanging off the incoming object — a stray key, a
+ * copy of a token a component should never have had — is dropped here rather
+ * than reaching the disk.
+ */
+function readSettings(payload: unknown): PinningSettings {
+  const raw = asRecord(payload)['settings']
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw plain('Those settings could not be read. Close the settings window, reopen it, and try again.')
+  }
+  const record = raw as Record<string, unknown>
+  const kubo = asRecord(record['kubo'])
+  const pinata = asRecord(record['pinata'])
+
+  const apiUrl = readAddress(
+    kubo['apiUrl'],
+    'The address of your IPFS node does not look right. It should look like http://127.0.0.1:5001 — that is the ' +
+      'usual address for a Kubo node running on this computer.'
+  )
+  const gateway = readAddress(
+    pinata['gateway'],
+    'That Pinata gateway address does not look right. It should be a full web address, like ' +
+      'https://yourname.mypinata.cloud.'
+  )
+
+  const settings: PinningSettings = {
+    kubo: {
+      enabled: readFlag(kubo, 'enabled', DEFAULT_PINNING_SETTINGS.kubo.enabled),
+      apiUrl: apiUrl ?? DEFAULT_PINNING_SETTINGS.kubo.apiUrl
+    },
+    pinata: {
+      enabled: readFlag(pinata, 'enabled', DEFAULT_PINNING_SETTINGS.pinata.enabled),
+      // Never taken from the window. The store recomputes it from what the
+      // keychain actually holds, and `settings:save` returns that answer.
+      hasToken: false
+    },
+    pinOnImport: readFlag(record, 'pinOnImport', DEFAULT_PINNING_SETTINGS.pinOnImport)
+  }
+  if (gateway !== undefined) settings.pinata.gateway = gateway
+  return settings
+}
+
+/**
+ * Take the Pinata key off the payload.
+ *
+ * Deliberately not `readString`: nothing here interpolates the value into a
+ * message, keeps it in a variable that outlives the call, or hands it to
+ * anything but the settings store.
+ */
+function readPinataToken(payload: unknown): string {
+  const value = asRecord(payload)['token']
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw plain('No Pinata key was entered. In Pinata, go to API Keys, open your key, copy the JWT, and paste it here.')
+  }
+  return value.trim()
+}
+
+/** The CIDs to pin: trimmed, de-duplicated, and capped. */
+function readCids(payload: unknown): string[] {
+  const raw = asRecord(payload)['cids']
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw plain('Nothing was selected to pin. Choose the content you want kept, then try again.')
+  }
+  if (raw.length > MAX_PIN_CIDS) {
+    throw plain(
+      `That is ${raw.length.toLocaleString('en-US')} things to pin at once, which is more than this app will do in ` +
+        `one go. Pin up to ${MAX_PIN_CIDS.toLocaleString('en-US')} at a time.`
+    )
+  }
+
+  const cids: string[] = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const cid = entry.trim()
+    // Not parsed as a CID here on purpose: an unusual but legitimate encoding
+    // would be rejected for no reason, whereas a genuinely bad address comes
+    // back as one failed row with an explanation, which is more useful than a
+    // whole run refused.
+    if (cid === '' || seen.has(cid)) continue
+    seen.add(cid)
+    cids.push(cid)
+  }
+
+  if (cids.length === 0) {
+    throw plain('None of those entries had a content ID, so there is nothing to pin.')
+  }
+  return cids
+}
+
+/**
+ * What one target says it is keeping, or `null` for "we did not get an answer".
+ *
+ * The distinction is the whole point. `mergePinStates` leaves a row's state
+ * *absent* — which reads as `unknown` — when it is handed `null`, and the
+ * contract in `pinning.ts` is explicit that `unknown` must never be shown as
+ * "not pinned". An empty set means "nothing is pinned" and is a real answer;
+ * both list calls throw rather than return a short set precisely so that an
+ * empty one can be trusted. Turning a failure into an empty set here would
+ * therefore paint a whole archive red and send a member off to re-pin thousands
+ * of files that were never at risk.
+ */
+async function readKuboPins(
+  settings: PinningSettings,
+  signal: AbortSignal
+): Promise<ReadonlySet<string> | null> {
+  if (!settings.kubo.enabled) return null
+  try {
+    return await listPins(settings.kubo.apiUrl, signal)
+  } catch (err) {
+    if (isAbortError(err)) throw err
+    // Not shown to the member: an unreachable node is the ordinary state on a
+    // computer with no Kubo installed, and it is reported properly by
+    // `pin:targets`. Here it just means "we do not know".
+    console.warn('[bic-archiver] could not read what the IPFS node is keeping:', err)
+    return null
+  }
+}
+
+async function readPinataPins(
+  settings: PinningSettings,
+  signal: AbortSignal
+): Promise<ReadonlySet<string> | null> {
+  if (!settings.pinata.enabled) return null
+  // Read here, in the main process, for this one call — never held, never
+  // returned, never passed to the window.
+  const token = await getPinataToken()
+  if (token === null) return null
+  try {
+    return await listPinnedCids(token, { signal })
+  } catch (err) {
+    if (isAbortError(err)) throw err
+    console.warn('[bic-archiver] could not read the Pinata pin list:', scrub(err))
+    return null
+  }
+}
+
+/** The optional `.car` whose blocks make the local node a provider. */
+function readOptionalCarPath(payload: unknown): string | undefined {
+  const value = asRecord(payload)['carPath']
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  return readPath(payload, 'carPath', 'The backup file to load')
 }
 
 /* ========================================================================== */
@@ -1059,6 +1528,7 @@ export function registerIpcHandlers(): void {
         items,
         (result) => {
           completed += 1
+          rememberHealth(result)
           sendHealth(event.sender, result)
           ctx.progress({
             id: ctx.id,
@@ -1214,6 +1684,327 @@ export function registerIpcHandlers(): void {
   })
 
   /* ---------------------------------------------------------------------- */
+  /* Pinning settings                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  handle<PinningSettings>('settings:get', 'reading your settings', async () =>
+    withoutSecrets(async () => safeSettings(await loadSettings()))
+  )
+
+  handle<PinningSettings>('settings:save', 'saving your settings', async (_event, payload) => {
+    const wanted = readSettings(payload)
+    return withoutSecrets(async () => {
+      await saveSettings(wanted)
+      // Read back rather than echo what was sent: `hasToken` is the keychain's
+      // answer, not the window's, and this is the only way the window learns it.
+      return safeSettings(await loadSettings())
+    })
+  })
+
+  /**
+   * The one value that travels *into* the main process and never comes out. It
+   * goes from the payload straight to the store, which encrypts it with the
+   * operating system's own credential store. Nothing here keeps it, echoes it,
+   * or writes it anywhere else — and on a computer with no secure place to put
+   * it the store refuses and explains why, rather than leaving a bearer
+   * credential in an ordinary file.
+   */
+  handle<TokenResult>('settings:setPinataToken', 'saving the Pinata key', async (_event, payload) =>
+    withoutSecrets(async () => {
+      await setPinataToken(readPinataToken(payload))
+      return { ok: true }
+    })
+  )
+
+  handle<TokenResult>('settings:clearPinataToken', 'removing the Pinata key', async () =>
+    withoutSecrets(async () => {
+      await clearPinataToken()
+      return { ok: true }
+    })
+  )
+
+  /* ---------------------------------------------------------------------- */
+  /* Pinning                                                                */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Which places this app can pin to right now.
+   *
+   * Never fails because a target is missing — a fresh Mac has no Kubo and most
+   * members will have no Pinata key — so an unusable target comes back with
+   * `available: false` and a `detail` that says what to do about it.
+   */
+  handle<PinTargetStatus[]>('pin:targets', 'checking where this can be pinned', async (event, payload) =>
+    runOperation(event, asRecord(payload)['opId'], 'checking your pinning setup', async (ctx) =>
+      withoutSecrets(async () => {
+        const settings = await loadSettings()
+        // Read for this one call and handed no further than the manager, which
+        // is main-process code. It is never returned to the window.
+        const token = await getPinataToken()
+        return scrubTargets(await getTargets(settings, token, ctx.signal))
+      })
+    )
+  )
+
+  /**
+   * One row per piece of content in the archive, with what each target is
+   * keeping folded in.
+   *
+   * The two pin lists are fetched once and applied to every row, rather than
+   * asked per CID: the DAO's archive holds 10,762 of them, and a round trip each
+   * would take the best part of an hour. A target that cannot be reached leaves
+   * its rows `unknown` rather than "not pinned" — see {@link readKuboPins}.
+   */
+  handle<AssetRow[]>('pin:assets', 'listing what is in this archive', async (event, payload) => {
+    const open = requireStore()
+
+    // Read-only, so not behind the archive lock: a member should be able to look
+    // at the list while something else is running.
+    return runOperation(event, asRecord(payload)['opId'], 'listing the archive', async (ctx) =>
+      withoutSecrets(async () => {
+        const settings = await loadSettings()
+        // Health verdicts from this session's checks are folded in here, where
+        // the CID-spelling logic lives; rows nothing was checked for stay
+        // 'unchecked', which is an honest answer rather than a guess.
+        const rows = mergeHealth(await buildAssetRows(open, ctx.signal), [...lastHealth.values()])
+        ctx.throwIfCancelled()
+
+        // Independent of each other, and each already has its own deadline.
+        const [kuboPins, pinataPins] = await Promise.all([
+          readKuboPins(settings, ctx.signal),
+          readPinataPins(settings, ctx.signal)
+        ])
+        ctx.throwIfCancelled()
+
+        return mergePinStates(rows, kuboPins, pinataPins)
+      })
+    )
+  })
+
+  /**
+   * Pin a chosen set of CIDs.
+   *
+   * `carPath` is what makes this work for content that is already gone. Pinata's
+   * pin-by-CID asks Pinata to *find* the content; for a dead CID there is
+   * nothing to find. Loading the backup into the local node first makes this
+   * computer a real provider, and the node's addresses then go to Pinata as
+   * `hostNodes` so it knows where to fetch from. Without the file, a dead CID
+   * cannot be rescued by any amount of asking.
+   */
+  handle<PinRunSummary>('pin:all', 'pinning that content', async (event, payload) => {
+    const cids = readCids(payload)
+    const carPath = readOptionalCarPath(payload)
+    // Pinning a list of CIDs does not require an archive to be open — but if one
+    // is, the manager can produce the `.car` itself, which is the difference
+    // between reviving dead content and merely asking about it.
+    const open = store
+
+    const run = async (): Promise<PinRunSummary> =>
+      runPinOperation(
+        event,
+        asRecord(payload)['opId'],
+        'pinning content',
+        async (ctx, onPinProgress) =>
+          withoutSecrets(async () => {
+            const settings = await loadSettings()
+            // Read here, used here, never returned: the manager is main-process
+            // code and the window is only ever told `hasToken`.
+            const token = await getPinataToken()
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'storing',
+              message:
+                cids.length === 1
+                  ? 'Making sure this content is kept…'
+                  : `Making sure ${cids.length.toLocaleString('en-US')} things are kept…`,
+              progress: 0
+            })
+
+            const summary = scrubSummary(
+              await pinAll(cids, {
+                settings,
+                token,
+                signal: ctx.signal,
+                onProgress: onPinProgress,
+                ...(carPath !== undefined ? { carPath } : {}),
+                ...(open !== null ? { store: open } : {})
+              })
+            )
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'done',
+              message: describePinRun(summary),
+              progress: 1
+            })
+            return summary
+          }),
+        // Whatever landed before Stop was pressed stays pinned; saying only
+        // "stopped" would suggest the work had been undone.
+        `${CANCELLED_MESSAGE} Everything pinned before you stopped is still pinned.`
+      )
+
+    // Pinning itself changes nothing, but with no `.car` to hand the manager
+    // assembles one from the open archive — and assembling writes the manifest.
+    // That path has to be serialised with every other job that writes it, or two
+    // of them race and one is lost.
+    return open !== null && carPath === undefined ? withArchiveLock('pinning content', run) : run()
+  })
+
+  /**
+   * Pin the whole open archive, root first.
+   *
+   * Always behind the archive lock: "pin this archive" means assembling it if
+   * that has not happened yet, and assembling writes the manifest.
+   */
+  handle<PinRunSummary>('pin:archive', 'pinning this archive', async (event, payload) => {
+    const open = requireStore()
+    const carPath = readOptionalCarPath(payload)
+
+    return withArchiveLock('pinning the archive', async () =>
+      runPinOperation(
+        event,
+        asRecord(payload)['opId'],
+        'pinning the archive',
+        async (ctx, onPinProgress) =>
+          withoutSecrets(async () => {
+            requireContents(open.manifest)
+            const settings = await loadSettings()
+            const token = await getPinataToken()
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'storing',
+              message: 'Making sure everything in this archive is kept…',
+              progress: 0
+            })
+
+            const summary = scrubSummary(
+              await pinArchive(open, {
+                settings,
+                token,
+                signal: ctx.signal,
+                onProgress: onPinProgress,
+                ...(carPath !== undefined ? { carPath } : {})
+              })
+            )
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'done',
+              message: describePinRun(summary),
+              progress: 1
+            })
+            return summary
+          }),
+        `${CANCELLED_MESSAGE} Everything pinned before you stopped is still pinned.`
+      )
+    )
+  })
+
+  /**
+   * Load a backup into the local IPFS node.
+   *
+   * This is the step that makes the rest possible. Pinata's pin-by-CID asks
+   * Pinata to *find* content on the network; for the 428 CIDs the May-2026
+   * sweep found dead there is nothing to find. Importing the `.car` here
+   * preserves every content ID exactly and turns this computer into a real
+   * provider for them, which is what gives Pinata somewhere to fetch from.
+   */
+  handle<KuboImportResult>(
+    'kubo:importCar',
+    'loading that backup into your IPFS node',
+    async (event, payload) => {
+      const carPath = readPath(payload, 'carPath', 'The backup file to load')
+
+      // Read-only as far as the archive is concerned, so it is deliberately not
+      // behind the archive lock: a member can load a backup into their node
+      // while the archiver is busy with something else.
+      return runPinOperation(
+        event,
+        asRecord(payload)['opId'],
+        'loading a backup into your IPFS node',
+        async (ctx, onPinProgress) =>
+          withoutSecrets(async () => {
+            const settings = await loadSettings()
+            const label = basename(carPath)
+            const startedAt = Date.now()
+
+            const beat = (message: string): void => {
+              onPinProgress({ cid: NO_CID_YET, target: 'kubo', phase: 'importing', message })
+            }
+            beat(`Loading ${label} into your IPFS node…`)
+
+            // `dag/import` reports nothing until it has finished, and 1.8 GB
+            // takes minutes. Without this the window would look frozen.
+            const heartbeat = setInterval(() => {
+              beat(
+                `Still loading ${label} into your IPFS node — ${describeElapsed(Date.now() - startedAt)} so far. ` +
+                  'Large backups take a few minutes.'
+              )
+            }, KUBO_IMPORT_HEARTBEAT_MS)
+            heartbeat.unref?.()
+
+            let imported: { roots: string[]; blocks: number }
+            try {
+              imported = await importCarToKubo(settings.kubo.apiUrl, carPath, {
+                // Unpinned blocks are deleted at the node's next tidy-up, which
+                // is precisely how content goes missing in the first place.
+                pinRoots: true,
+                signal: ctx.signal
+              })
+            } catch (err) {
+              // Why this event carries no detail: the reason reaches the member
+              // through this call's own `{ ok: false, error }`, already written
+              // in plain English. This exists so the row in the window stops
+              // spinning, and saying it twice would mean logging it twice.
+              onPinProgress({
+                cid: NO_CID_YET,
+                target: 'kubo',
+                phase: 'error',
+                message: ctx.signal.aborted
+                  ? CANCELLED_MESSAGE
+                  : `Could not load ${label} into your IPFS node.`
+              })
+              throw err
+            } finally {
+              clearInterval(heartbeat)
+            }
+            ctx.throwIfCancelled()
+
+            const roots = imported.roots
+              .map((root) => asCidString(root))
+              .filter((root): root is string => root !== null)
+
+            const blocks = imported.blocks.toLocaleString('en-US')
+            if (roots.length === 0) {
+              onPinProgress({
+                cid: NO_CID_YET,
+                target: 'kubo',
+                phase: 'done',
+                message: `Loaded ${blocks} pieces, but the backup did not say what its contents are, so nothing could be kept.`,
+                progress: 1
+              })
+            } else {
+              for (const root of roots) {
+                onPinProgress({
+                  cid: root,
+                  target: 'kubo',
+                  phase: 'done',
+                  message: `Loaded and kept on your node. ${blocks} pieces from ${label}. Your computer is now sharing this content.`,
+                  progress: 1
+                })
+              }
+            }
+
+            return { roots, blocks: imported.blocks }
+          })
+      )
+    }
+  )
+
+  /* ---------------------------------------------------------------------- */
   /* Native pickers                                                         */
   /* ---------------------------------------------------------------------- */
 
@@ -1366,6 +2157,55 @@ function defaultBackupName(): string {
   const base = sanitizeFolderName(typeof name === 'string' && name !== '' ? name : 'archive', 'archive')
   const stamp = new Date().toISOString().slice(0, 10)
   return `${base} ${stamp}.car`
+}
+
+/**
+ * Belt and braces on the way out.
+ *
+ * `toPlainMessage` only ever sees *failures*; a successful result travels to the
+ * window untouched. These two carry text quoted from a pinning service — the one
+ * place a credential could plausibly be echoed back at us — so they are scrubbed
+ * explicitly. Both are small (targets are two entries, failures are capped at
+ * 500), so this costs nothing worth measuring.
+ */
+function scrubTargets(targets: PinTargetStatus[]): PinTargetStatus[] {
+  return targets.map((target) =>
+    target.detail === undefined ? target : { ...target, detail: redactSecrets(target.detail) }
+  )
+}
+
+function scrubSummary(summary: PinRunSummary): PinRunSummary {
+  return {
+    ...summary,
+    failures: summary.failures.map((failure) =>
+      failure.error === undefined ? failure : { ...failure, error: redactSecrets(failure.error) }
+    )
+  }
+}
+
+/** One sentence a member can read off the end of a pin run. */
+function describePinRun(summary: PinRunSummary): string {
+  const n = (value: number): string => Math.max(0, Math.round(value)).toLocaleString('en-US')
+  if (summary.requested <= 0) return 'There was nothing to pin.'
+
+  const head = `Pinned ${n(summary.pinned)} of ${n(summary.requested)}.`
+  const notes: string[] = []
+  if (summary.queued > 0) {
+    notes.push(`${n(summary.queued)} are still being copied — check again in a few minutes`)
+  }
+  if (summary.skipped > 0) notes.push(`${n(summary.skipped)} were skipped`)
+  if (summary.failed > 0) notes.push(`${n(summary.failed)} could not be pinned — open them to see why`)
+  return notes.length === 0 ? head : `${head} ${notes.join('. ')}.`
+}
+
+/** "40 seconds", "3 minutes 5 seconds" — for a member watching a long job. */
+function describeElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? '' : 's'}`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  const head = `${minutes} minute${minutes === 1 ? '' : 's'}`
+  return rest === 0 ? head : `${head} ${rest} second${rest === 1 ? '' : 's'}`
 }
 
 function formatBytes(bytes: number): string {

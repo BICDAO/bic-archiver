@@ -332,6 +332,18 @@ a {
   background: var(--bg-elev);
 }
 
+/*
+ * Settings lives at the foot of the sidebar, apart from the run of screens: it
+ * is somewhere a member goes once, not a step in the job. `margin-top: auto`
+ * pushes it — and the block below it — down, so the two always sit together at
+ * the bottom however many sections are above them.
+ */
+.nav-secondary {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .sidebar-foot {
   display: flex;
   flex-direction: column;
@@ -339,6 +351,11 @@ a {
   margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+/* Two blocks both claiming the free space would double the gap between them. */
+.nav-secondary + .sidebar-foot {
+  margin-top: 0;
 }
 
 .main {
@@ -360,6 +377,10 @@ a {
   flex-direction: column;
   gap: 22px;
   max-width: 1080px;
+
+  /* Without this a table wider than the window stretches the column instead of
+     scrolling inside its own wrapper, and the whole page slides sideways. */
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -740,6 +761,8 @@ a {
 /* ========================================================================== */
 
 .table-wrap {
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -1082,11 +1105,12 @@ a {
 /* ========================================================================== */
 /* Shared components                                                          */
 /* -------------------------------------------------------------------------- */
-/* `Cid.tsx`, `ProgressList.tsx` and `AddTokensView.tsx` are written elsewhere */
-/* but build on the primitives above, so all they need here is the handful of  */
-/* class names of their own. Their convention is BEM; the tokens and the       */
-/* meaning of every colour are the same either way, which is what keeps the    */
-/* two halves of the window looking like one app.                              */
+/* `Cid.tsx` and `ProgressList.tsx` are written elsewhere but build on the     */
+/* primitives above, so all they need here is the handful of class names of    */
+/* their own. Their convention is BEM; the tokens and the meaning of every     */
+/* colour are the same either way, which is what keeps the two halves of the   */
+/* window looking like one app. (`AddTokensView.tsx` adds `add-tokens__*`      */
+/* hooks but asks nothing of them — every rule it relies on is a shared one.)  */
 /* ========================================================================== */
 
 /* --- content IDs --------------------------------------------------------- */
@@ -1196,6 +1220,610 @@ a {
 }
 
 /* ========================================================================== */
+/* Switches                                                                   */
+/* -------------------------------------------------------------------------- */
+/* Used by the Settings screen. The real control is a native checkbox, kept in */
+/* the document and merely made invisible, so keyboard operation, screen       */
+/* readers and form semantics are the browser's rather than ours. Only the     */
+/* focus ring has to be moved by hand, from the hidden input to the track.     */
+/* ========================================================================== */
+
+.switch {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.switch__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch__track {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 23px;
+  margin-top: 2px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.switch__thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 15px;
+  height: 15px;
+  background: var(--bg-elev);
+  border-radius: 50%;
+  box-shadow: var(--shadow-sm);
+  transition: transform 120ms ease;
+}
+
+.switch__input:checked + .switch__track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch__input:checked + .switch__track .switch__thumb {
+  background: var(--accent-contrast);
+  transform: translateX(17px);
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.switch__input:disabled + .switch__track {
+  opacity: 0.55;
+}
+
+.switch:has(.switch__input:disabled) {
+  cursor: not-allowed;
+}
+
+.switch__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.switch__label {
+  font-weight: 600;
+}
+
+.switch__hint {
+  max-width: 68ch;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Ordinary checkboxes — the Assets table's row selection — in both themes. */
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+/* ========================================================================== */
+/* Commands to type, and addresses to read                                    */
+/* ========================================================================== */
+
+/*
+ * The three commands that install an IPFS node. A member is going to paste
+ * these into Terminal, so they are selectable text with a copy button rather
+ * than a picture of a command, and they never wrap: a shell command broken
+ * across lines is a shell command that fails.
+ */
+.codeblock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.codeblock__code {
+  margin: 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: pre;
+}
+
+.codeblock__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.code-inline {
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+/* A node's dialable addresses. Long, and every character of them matters. */
+.addr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.addr {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* ========================================================================== */
+/* Assets                                                                     */
+/* -------------------------------------------------------------------------- */
+/* `AssetsView.tsx` is written elsewhere and builds on the primitives above —  */
+/* `.view`, `.card`, `.table`, `.pill-*`, `.cid`, `.field` — so what follows   */
+/* is only the classes that are its own, in the order they appear on screen,   */
+/* and it is written against the list that file publishes at its foot. The     */
+/* colours and their meanings are the shared ones, so an amber pill means "at  */
+/* risk" here exactly as it does on the Health screen.                        */
+/*                                                                            */
+/* Where a rule carries two selectors — `.assets-filter` and `.assets-control` */
+/* say — the second is an alternate spelling that file has used for the same   */
+/* element. The two halves of the window are written separately, and a member  */
+/* should never meet an unstyled table because of one renamed class.           */
+/*                                                                            */
+/* One rule below is load-bearing rather than cosmetic. The table is           */
+/* virtualised against a row height of exactly 40px, set inline by that file   */
+/* because the scroll maths depends on it. A collapsed 1px bottom border adds  */
+/* to the height of every row, so the shared `.table` separator would walk     */
+/* 10,762 rows about 10,000px out of step with their own scrollbar. The        */
+/* separators here are drawn with an inset shadow instead: same hairline, no   */
+/* height.                                                                    */
+/* ========================================================================== */
+
+/*
+ * The archive has 10,762 content IDs in it, so the table scrolls inside its own
+ * box — sideways, so the page body never slides out from under the sidebar, and
+ * vertically, so the figures above it and the Pin button stay on screen while a
+ * member scrolls thousands of rows.
+ *
+ * Height and `overflow` are set inline by `AssetsView` and must not be
+ * overridden here. `max-height` is absent for the same reason: it does not lose
+ * to an inline `height`, it silently clamps it, and the virtual list would then
+ * be measuring a box that is not the one on screen.
+ */
+.assets-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overscroll-behavior: contain;
+}
+
+/* The header stays put while the rows move under it, so it needs a background
+   of its own — and a separator that costs no height, as above. */
+.assets-table thead th {
+  background: var(--bg-sunken);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.assets-table th,
+.assets-table td {
+  border-bottom: 0;
+}
+
+/* The two spacer rows that hold the scroll height open are `aria-hidden`, and
+   are skipped so neither draws a stray line across the empty space. */
+.assets-table tbody tr:not([aria-hidden='true']) > td {
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+/*
+ * The files BIC rescued from Arweave and from old websites: the rows where
+ * 96.5% and 88.6% of the deaths happened, against 0.7% everywhere else. Tinted
+ * so that pattern can be seen by scanning rather than read row by row. The
+ * "rescued" badge says the same thing in words, so the colour is reinforcement
+ * and never the only signal.
+ */
+.assets-table tbody tr[data-rescued='yes'] > td {
+  background: color-mix(in srgb, var(--warn-soft) 45%, transparent);
+}
+
+.assets-table tbody tr[data-rescued='yes']:hover > td {
+  background: var(--bg-hover);
+}
+
+/* The two buttons in the page header, side by side. */
+.assets-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Whether there is anywhere to pin to at all. */
+.assets-targets {
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* ---- the figures -------------------------------------------------------- */
+
+.assets-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  gap: 12px;
+}
+
+/*
+ * Each figure but the last is a button that filters the table to exactly those
+ * rows, so each has to read as pressable. The last is a plain element and
+ * deliberately does not.
+ */
+.assets-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 13px 15px;
+  text-align: left;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+button.assets-stat {
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+button.assets-stat:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.assets-stat-value {
+  font-size: 22px;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.assets-stat-label {
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* Green kept, amber at risk, red gone — the same meanings as everywhere else. */
+.assets-stat-ok,
+.assets-stat.is-ok {
+  border-left-color: var(--ok);
+}
+
+.assets-stat-warn,
+.assets-stat.is-warn {
+  border-left-color: var(--warn);
+}
+
+.assets-stat-danger,
+.assets-stat.is-danger {
+  border-left-color: var(--danger);
+}
+
+.assets-stat-ok .assets-stat-value,
+.assets-stat.is-ok .assets-stat-value {
+  color: var(--ok);
+}
+
+.assets-stat-warn .assets-stat-value,
+.assets-stat.is-warn .assets-stat-value {
+  color: var(--warn);
+}
+
+.assets-stat-danger .assets-stat-value,
+.assets-stat.is-danger .assets-stat-value {
+  color: var(--danger);
+}
+
+/* How big the archive is. A fact, not a warning, and not a filter either. */
+.assets-stat-quiet,
+.assets-stat.is-quiet {
+  background: var(--bg-sunken);
+  border-left-color: var(--border);
+}
+
+.assets-stat-quiet .assets-stat-value,
+.assets-stat.is-quiet .assets-stat-value {
+  font-size: 19px;
+  color: var(--text-muted);
+}
+
+/* ---- filters ------------------------------------------------------------ */
+
+/* `AssetsView` writes `card assets-filters` without `stack`, so the column
+   layout comes from here rather than from the shared card. */
+.assets-filters,
+.assets-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.assets-filter-row,
+.assets-control-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px;
+}
+
+/* One labelled control. `.field` already stacks its label above its input. */
+.assets-filter,
+.assets-control {
+  min-width: 0;
+}
+
+/*
+ * A `<select>` is not covered by the `input, textarea { font: inherit }` rule
+ * near the top, so without this one it renders in the browser's own font beside
+ * inputs that do not. The native arrow is replaced by hand because giving a
+ * select a background colour suppresses it in Chromium, and a dropdown with no
+ * arrow does not read as a dropdown. Two spellings of the chevron, one per
+ * theme, because a data URI cannot use `currentcolor`.
+ */
+.assets-select,
+.assets-dropdown {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  appearance: none;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.75 4.5 6 7.75 9.25 4.5' fill='none' stroke='%23545e6d' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 11px 11px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .assets-select,
+  .assets-dropdown {
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.75 4.5 6 7.75 9.25 4.5' fill='none' stroke='%23a2adbd' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+}
+
+.assets-filter-foot,
+.assets-controls-foot {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.assets-toggle {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+/* "N rows ticked — Pin selected". Present always, loud never. */
+.assets-selection {
+  padding: 10px 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* ---- the table's own controls ------------------------------------------- */
+
+/* The button inside a sortable header. It has to look like the header text it
+   replaces, so everything the `<th>` sets is inherited rather than restated. */
+.assets-sort {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  background: none;
+  border: 0;
+}
+
+.assets-sort:hover {
+  color: var(--text);
+}
+
+.assets-sort.is-active {
+  color: var(--accent);
+}
+
+.assets-sort-arrow {
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+.assets-sort.is-active .assets-sort-arrow {
+  color: var(--accent);
+}
+
+/* ---- pin state ---------------------------------------------------------- */
+
+/*
+ * A pin-state pill sits on `.pill`, so its colours are the shared ones. Only
+ * `unknown` is special, and it is deliberately a quiet dash rather than a pill
+ * of its own: "we did not ask" and "nobody is keeping this" are different
+ * facts, and drawing them alike would either send a member re-pinning ten
+ * thousand safe files or hide the ones that genuinely need it.
+ */
+.assets-pin {
+  max-width: 100%;
+}
+
+/*
+ * Inside this table only, the shared pill is drawn a shade tighter. The status
+ * columns are narrow and the labels are long — "Not pinned" and "Unreachable"
+ * are the two that matter most and the two that are widest — and a pill cut in
+ * half by the edge of its cell reads as a rendering fault. This is a screen a
+ * member has to trust, so the labels have to arrive whole.
+ */
+.assets-table .pill {
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.assets-table .pill-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.assets-pin-unknown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  color: var(--text-faint);
+}
+
+/*
+ * The same states again, for the spelling that carries them on the element
+ * rather than in the class name. `AssetsView` has drawn its pin cells both ways
+ * while this screen was being built; this block, and the second selector on the
+ * filter rules above, are what stop a rename there leaving a member looking at
+ * an unstyled status column. Safe to delete once that file has settled — the
+ * list at its foot is the contract, and today the contract is `.pill`.
+ *
+ * `unknown` has no border and no fill on purpose: it is a dash, not a status,
+ * and a member must be able to tell at a glance that we did not ask rather than
+ * that the answer was no.
+ */
+.pin-state {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+.pin-state[data-state='pinned'] {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+}
+
+.pin-state[data-state='pinning'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.pin-state[data-state='not-pinned'] {
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+  border-color: var(--border);
+}
+
+.pin-state[data-state='failed'] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+}
+
+.pin-state[data-state='unknown'] {
+  justify-content: center;
+  min-width: 24px;
+  padding: 0;
+  font-weight: 550;
+  color: var(--text-faint);
+  background: none;
+  border-color: transparent;
+}
+
+/* Small enough to sit inside a pill without making its row taller than 40px. */
+.spinner-xs {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+
+/* The badge on a row BIC rescued, beside what the file is. */
+.assets-rescued {
+  display: inline-block;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-pill);
+}
+
+/* Which NFT a row belongs to, and what the file is. Both sit in cells that
+   truncate, so neither may wrap. */
+.assets-nft {
+  font-weight: 600;
+}
+
+.assets-role {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/*
+ * The run's own commentary while it works — one line, above the table. Given a
+ * box of its own when it is also marked `.assets-progress`, so that a member
+ * can see at a glance that the app is mid-run rather than reporting.
+ */
+.assets-note {
+  color: var(--text-muted);
+}
+
+.assets-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+/* ========================================================================== */
 /* Narrow windows                                                             */
 /* ========================================================================== */
 
@@ -1220,8 +1848,22 @@ a {
     width: auto;
   }
 
+  /* The sidebar is a horizontal strip here, so "push it to the bottom" and the
+     rule above it stop making sense — Settings just joins the row. */
+  .nav-secondary {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+
   .sidebar-foot {
     margin-top: 0;
+  }
+
+  /* Two columns of figures rather than five squeezed ones; the labels are
+     sentences, and a sentence in a 90px column is a stack of single words. */
+  .assets-summary {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   }
 
   .main-scroll {

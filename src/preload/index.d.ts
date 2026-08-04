@@ -27,8 +27,30 @@ export type {
   HealthCheckResult,
   ImportCarResult,
   IpcResult,
-  MergeExistingResult
+  KuboImportResult,
+  MergeExistingResult,
+  TokenResult
 } from './index'
+
+/**
+ * The pinning shapes come from `src/shared/pinning.ts` and are re-exported here
+ * so a component can name them without reaching across the tree — and so the
+ * window never has to import from `src/main`, where the Pinata key lives.
+ *
+ * Note what is *not* in `PinningSettings`: the key itself. It carries
+ * `pinata.hasToken: boolean` only, which is the entire reason the renderer can
+ * be typed against the real settings object at all.
+ */
+export type {
+  AssetRow,
+  PinProgress,
+  PinResult,
+  PinRunSummary,
+  PinState,
+  PinTargetId,
+  PinTargetStatus,
+  PinningSettings
+} from '../shared/pinning'
 
 declare global {
   interface Window {

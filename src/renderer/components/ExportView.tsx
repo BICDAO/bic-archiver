@@ -29,8 +29,24 @@ import {
   useOperation
 } from './Layout'
 
-/** Where a pinning service can keep a .car alive. The member signs up, not us. */
-const STORACHA_URL = 'https://storacha.network'
+/*
+ * This screen used to end with a button to storacha.network, described as a
+ * service that "accepts .car files directly". It is gone: `up.storacha.network`,
+ * `console.storacha.network` and `access.storacha.network` have no DNS records
+ * at all, and the apex now redirects elsewhere. Sending a member there would be
+ * sending them to nothing — and worse, telling them the backup was safe once
+ * they got there.
+ *
+ * The honest answer now lives inside the app, in two steps: Settings, for the
+ * local IPFS (Kubo) node and the Pinata key, then Assets ▸ Pin everything. No
+ * external pinning link belongs on this screen, and not only because the last
+ * one rotted. Handing a .car to a service is not what puts content back: asking
+ * a service to pin a content ID asks it to go and *find* that content, which
+ * cannot work for the files this archive exists to rescue, because nobody is
+ * offering them any more. A node here holding the backup is what makes them
+ * fetchable again, and `manager.ts` passes that node's multiaddrs to Pinata as
+ * `hostNodes` so Pinata fetches from it. See docs/PINNING.md §2 and §3.
+ */
 
 /* ========================================================================== */
 /* Reveal-in-folder                                                           */
@@ -63,9 +79,25 @@ function RevealButton({ path, children }: { path: string; children: ReactNode })
 export interface ExportViewProps {
   snapshot: ArchiveSnapshot
   onSnapshot: (snapshot: ArchiveSnapshot) => void
+  /**
+   * Take the member to the Assets screen, where the backup is actually pinned.
+   * Optional, and degrades to plain words rather than a dead button — same
+   * contract as `HealthView`'s `onExport`.
+   */
+  onOpenAssets?: () => void
+  /**
+   * Take the member to Settings, which is where the node and the Pinata key are
+   * set up — the step before Assets can do anything. Optional on the same terms.
+   */
+  onOpenSettings?: () => void
 }
 
-export default function ExportView({ snapshot, onSnapshot }: ExportViewProps): ReactNode {
+export default function ExportView({
+  snapshot,
+  onSnapshot,
+  onOpenAssets,
+  onOpenSettings
+}: ExportViewProps): ReactNode {
   const carOp = useOperation()
   const folderOp = useOperation()
   const importOp = useOperation()
@@ -97,7 +129,7 @@ export default function ExportView({ snapshot, onSnapshot }: ExportViewProps): R
       start: 'Writing the backup file…',
       body: (opId) => window.api.exportCar(path, opId),
       success: (value) =>
-        `Backup saved — ${formatCount(value.blocks)} pieces, ${formatBytes(value.bytes)}. Keep this file somewhere safe, and give a copy to a pinning service so the content stays online.`
+        `Backup saved — ${formatCount(value.blocks)} pieces, ${formatBytes(value.bytes)}. Keep this file somewhere safe, and keep a copy off this computer. The file on its own does not put the content back on IPFS — that is what Assets ▸ Pin everything does.`
     })
     if (result !== null) setCarPath(result.path)
   }, [carOp])
@@ -178,11 +210,21 @@ export default function ExportView({ snapshot, onSnapshot }: ExportViewProps): R
 
   /* ---------------------------------------------------------------- */
 
+  /** Sidebar directions for whichever screen this view cannot navigate to. */
+  const whereToFind =
+    onOpenSettings === undefined && onOpenAssets === undefined
+      ? 'Both are in the sidebar on the left — Assets in the run of screens, Settings at the foot of it.'
+      : onOpenSettings === undefined
+        ? 'Settings is at the foot of the sidebar on the left.'
+        : onOpenAssets === undefined
+          ? 'Assets is in the sidebar on the left.'
+          : null
+
   return (
     <div className="view">
       <ViewHeader
         title="Export"
-        lead="Save everything in this archive to a file you can keep, hand to another member, or give to a service that will keep it online."
+        lead="Save everything in this archive to a file you can keep, hand to another member, or read back into the app later. Putting the content back on IPFS is the step after this one, on Assets."
       />
 
       {isEmpty && (
@@ -231,7 +273,7 @@ export default function ExportView({ snapshot, onSnapshot }: ExportViewProps): R
           </p>
           <ul className="bullets small">
             <li>Restore it into this app, or hand it to another member.</li>
-            <li>Upload it to a pinning service to put the content back on IPFS.</li>
+            <li>Import it into your own IPFS node, from Assets, to put the content back online.</li>
             <li>Not something you can browse by double-clicking — that is the other option.</li>
           </ul>
           <div className="choice-foot stack">
@@ -286,22 +328,52 @@ export default function ExportView({ snapshot, onSnapshot }: ExportViewProps): R
       <Card title="Keeping the backup online">
         <p className="muted">
           A .car file on your own computer protects the content, but it does not put it back on
-          IPFS. To do that, upload the file to a pinning service — a company that keeps content
-          available for you. <strong>Storacha</strong> is one that accepts .car files directly.
+          IPFS. Nothing on the network is serving these files until somebody pins them — and the
+          content this archive rescued from Arweave and old websites is precisely the content
+          nobody else is keeping.
         </p>
         <p className="small muted">
-          You sign up with them yourself. This app never sees your account, and it never handles any
-          payment — it only makes the file you upload.
+          Asking a pinning service to keep a content ID asks it to go and <em>find</em> that
+          content somewhere on the network and copy it. For something people are still sharing that
+          works. For something that has already gone quiet there is nothing to find, and the
+          request simply expires — which is why no service, on its own, can rescue the files this
+          archive was made for. What can is an IPFS node on this computer with the backup imported
+          into it: that makes those content IDs fetchable again, and the app passes your node&rsquo;s
+          addresses to Pinata itself, so Pinata collects from you instead of searching.
         </p>
-        <div className="row">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void window.api.openExternal(STORACHA_URL)}
-          >
-            Open storacha.network in your browser
-          </button>
-        </div>
+        <ul className="bullets small">
+          <li>
+            <strong>Settings</strong> — point the app at your own IPFS node (a free program, no
+            account), and paste a Pinata key if the DAO has one. Pinata is what keeps the content
+            up while this computer is switched off.
+          </li>
+          <li>
+            <strong>Assets</strong> ▸ <strong>Pin everything</strong> — imports the backup into
+            your node, asks Pinata to fetch it from there, and then checks that it really arrived.
+          </li>
+        </ul>
+        <p className="small muted">
+          Saving the .car and stopping there is how content goes quietly dark — in the DAO&rsquo;s
+          real May 2026 backup, 428 content IDs had already gone that way.
+        </p>
+        {(onOpenSettings !== undefined || onOpenAssets !== undefined) && (
+          <div className="row">
+            {onOpenSettings !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={onOpenSettings}>
+                Set up pinning in Settings
+              </button>
+            )}
+            {onOpenAssets !== undefined && (
+              <button type="button" className="btn" onClick={onOpenAssets}>
+                Go to Assets
+              </button>
+            )}
+          </div>
+        )}
+        {/* Whatever the window did not hand us a way to reach, say where it is
+            instead. A member told to open a screen that has no button and no
+            address is a member who stops here. */}
+        {whereToFind !== null && <p className="small muted">{whereToFind}</p>}
       </Card>
 
       {/* -------------------------------------------------------------- */}

@@ -70,6 +70,15 @@ const FALLBACK_API: ArchiverApi = {
   exportCar: () => missing(),
   exportFolder: () => missing(),
   importCar: () => missing(),
+  getSettings: () => missing(),
+  saveSettings: () => missing(),
+  setPinataToken: () => missing(),
+  clearPinataToken: () => missing(),
+  pinTargets: () => missing(),
+  pinAssets: () => missing(),
+  pinAll: () => missing(),
+  pinArchive: () => missing(),
+  kuboImportCar: () => missing(),
   pickDirectory: () => missing(),
   saveCar: () => missing(),
   openCar: () => missing(),
@@ -81,7 +90,8 @@ const FALLBACK_API: ArchiverApi = {
     return `op-unavailable-${String(fallbackOperationCounter)}`
   },
   onProgress: () => () => undefined,
-  onHealth: () => () => undefined
+  onHealth: () => () => undefined,
+  onPinProgress: () => () => undefined
 }
 
 function looksLikeApi(candidate: unknown): candidate is ArchiverApi {
