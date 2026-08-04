@@ -624,7 +624,11 @@ function KeepArchiveAlive({
     node !== null && node.state === 'error' && node.detail !== undefined ? node.detail : null
 
   return (
-    <Card title="Help keep BIC's archive alive" lead={lead}>
+    // The accent lives here, and only here on this screen: this is the one
+    // action most members will ever need to take. The busy, error and
+    // already-helping states above deliberately do not carry it — there is
+    // nothing left to decide by then.
+    <Card title="Help keep BIC's archive alive" lead={lead} accent>
       <div className="stack">
         {nodeReady ? (
           <>
@@ -850,7 +854,12 @@ export default function Welcome({
       <KeepArchiveAlive driftIsBehind={driftIsBehind} onOpenSettings={onOpenSettings} />
 
       <div className="choice-grid">
-        <section className="choice choice-recommended">
+        {/*
+          No accent. Starting an archive of your own is a perfectly good thing
+          to do, but it is not what most members came here for — the card above
+          is. Two accented cards would just mean neither reads as the answer.
+        */}
+        <section className="choice">
           <h2 className="choice-title">Start a new archive</h2>
           <p className="choice-why">
             An archive is just a folder on this computer. Everything downloaded is kept inside it,
@@ -950,20 +959,40 @@ export default function Welcome({
         </div>
       )}
 
-      <Card title="What this app is doing for you">
+      <Card title="Why this matters">
         <ul className="bullets">
-          <li>Reads the token&rsquo;s description straight from the contract, proxies and all.</li>
           <li>
-            Decodes descriptions that are stored on the blockchain itself, instead of you pasting
-            them into a decoder.
+            IPFS only keeps a file while somebody is offering it. When the last computer offering
+            it switches off, the file is gone, and nothing anywhere sends up a flare.
           </li>
           <li>
-            Downloads every file in a way that keeps its original IPFS content ID — and, when the
-            content has to be rescued from an ordinary gateway, works the original ID out again and
-            tells you whether it matched.
+            That has already happened to BIC. Of the 10,762 files in the last backup,{' '}
+            <strong>428 were being offered by nobody at all</strong> — and 12 artworks existed
+            nowhere but a single file in a single Google Drive folder.
           </li>
-          <li>Warns you when content has fallen off the network, instead of failing silently.</li>
+          <li>
+            It hit one kind of file hardest: the pieces BIC rescued from Arweave and old websites.
+            Almost all of those were gone, against well under one in a hundred of the rest. Popular
+            art is kept alive by strangers; BIC&rsquo;s rescues are kept alive by BIC.
+          </li>
+          <li>
+            Which is the whole idea here. Every member running this is one more place the archive
+            can come back from, and it costs you some disk space and nothing else.
+          </li>
         </ul>
+      </Card>
+
+      <Card title="Who made this, and who to ask">
+        <p className="card-lead">
+          This app was written by Claude, Anthropic&rsquo;s AI, working with BIC. The code is open
+          for anyone to read or check.
+        </p>
+        <p className="card-lead">
+          If something does not work, or a word here does not make sense, tag{' '}
+          <strong>@Path</strong> in the BIC Discord. No question is too basic — the app exists
+          because this stuff is genuinely confusing, and being stuck is worth saying out loud
+          rather than quietly giving up on.
+        </p>
       </Card>
     </div>
   )

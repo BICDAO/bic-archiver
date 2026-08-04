@@ -191,15 +191,21 @@ export function Card({
   title,
   lead,
   actions,
+  accent,
   children
 }: {
   title?: string
   lead?: ReactNode
   actions?: ReactNode
+  /**
+   * Marks this card as the thing to do on the screen. Exactly one card should
+   * carry it — an accent on everything is an accent on nothing.
+   */
+  accent?: boolean
   children?: ReactNode
 }): ReactNode {
   return (
-    <section className="card stack">
+    <section className={accent === true ? 'card card-accent stack' : 'card stack'}>
       {(title !== undefined || actions !== undefined) && (
         <div className="row row-between">
           <div className="grow">

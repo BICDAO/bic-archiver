@@ -2955,3 +2955,16 @@ button.assets-stat:hover {
   color: var(--fg);
   border-color: var(--border, rgba(127, 127, 127, 0.35));
 }
+
+/* --------------------------------------------------------------------------
+   The one card that is the thing to do.
+
+   Deliberately the same treatment `.choice-recommended` gives a choice card,
+   so "this is the answer" looks the same wherever it appears. Exactly one
+   card per screen should carry it.
+   -------------------------------------------------------------------------- */
+
+.card-accent {
+  border-color: var(--accent-line);
+  box-shadow: var(--shadow);
+}
