@@ -2872,6 +2872,38 @@ export function registerIpcHandlers(): void {
     return chosen
   })
 
+  /**
+   * Where a new archive should go, without making the member invent a folder.
+   *
+   * Asking somebody to "choose an empty folder" is asking them to understand
+   * why emptiness matters before they have any idea what an archive is, and it
+   * is the first thing a new member is confronted with. So we propose a
+   * sensible path, create it on their behalf, and leave changing it as the
+   * option rather than the requirement.
+   *
+   * The name is run through the same sanitiser the archive layout uses, so a
+   * collection called `Vibing Cat / v2` cannot turn into a path traversal, and
+   * a busy Documents folder gets `name 2`, `name 3` rather than a collision.
+   */
+  handle<string>('archive:suggestPath', 'working out where to put the archive', async (_event, payload) => {
+    const raw = readOptionalString(payload, 'name') ?? ''
+    const folder = sanitizeFolderName(raw, 'DAO archive')
+    const base = join(app.getPath('documents'), 'BIC Archives')
+
+    let candidate = join(base, folder)
+    for (let n = 2; n < 100; n += 1) {
+      const taken = await stat(candidate).then(
+        () => true,
+        () => false
+      )
+      if (!taken) break
+      candidate = join(base, `${folder} ${String(n)}`)
+    }
+
+    approvePath(candidate)
+    return candidate
+  })
+
   handle<string | null>('dialog:saveCar', 'opening the save window', async (event, payload) => {
     const parent = BrowserWindow.fromWebContents(event.sender)
     const suggested = readOptionalString(payload, 'defaultName') ?? defaultBackupName()

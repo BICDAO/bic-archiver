@@ -91,6 +91,7 @@ const FALLBACK_API: ArchiverApi = {
   uninstallNode: () => missing(),
   setAutostart: () => missing(),
   checkDrift: () => missing(),
+  suggestArchivePath: () => missing(),
   pickDirectory: () => missing(),
   saveCar: () => missing(),
   openCar: () => missing(),

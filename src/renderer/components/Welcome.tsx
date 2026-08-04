@@ -730,6 +730,32 @@ export default function Welcome({
    */
   const [driftIsBehind, setDriftIsBehind] = useState(false)
 
+  /**
+   * Where the new archive will go. `suggested` is proposed by the engine from
+   * the name and is what almost everyone will use; `chosenDir` is set only when
+   * a member deliberately picks somewhere else, and then wins.
+   */
+  const [suggested, setSuggested] = useState<string | null>(null)
+  const [chosenDir, setChosenDir] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = setTimeout(() => {
+      const wanted = name.trim() === '' ? 'DAO archive' : name.trim()
+      void getApi()
+        .suggestArchivePath(wanted)
+        .then((result) => {
+          if (!cancelled && result.ok) setSuggested(result.value)
+        })
+    }, 200)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [name])
+
+  const targetDir = chosenDir ?? suggested
+
   /** The folder picker, with "the member closed it" told apart from a failure. */
   const askForFolder = useCallback(async (title: string): Promise<string | null> => {
     const chosen = await getApi().pickDirectory({ title })
@@ -750,7 +776,13 @@ export default function Welcome({
     setProblem(null)
     setWorking(true)
     try {
-      const dir = await askForFolder('Choose an empty folder to keep this archive in')
+      /*
+       * The folder is ours to make. Asking a member to "choose an empty folder"
+       * makes them understand why emptiness matters before they know what an
+       * archive is — and it was the very first thing the app demanded of them.
+       * A location is proposed instead, and changing it is the option.
+       */
+      const dir = targetDir ?? (await askForFolder('Choose where to keep this archive'))
       if (dir === null) return
       const created = await getApi().createArchive(
         dir,
@@ -765,7 +797,7 @@ export default function Welcome({
     } finally {
       setWorking(false)
     }
-  }, [archive, askForFolder, name, onOpened])
+  }, [archive, askForFolder, name, onOpened, targetDir])
 
   const openExisting = useCallback(async () => {
     setProblem(null)
@@ -800,11 +832,6 @@ export default function Welcome({
 
       <div>
         <h1 className="welcome-title">BIC Archiver</h1>
-        <p className="welcome-lead">
-          Paste a contract address and this app reads the NFTs off the blockchain, downloads
-          everything they point at, and saves it as a backup that can be checked by anyone — no IPFS
-          software to install, no hashes to copy by hand.
-        </p>
       </div>
 
       {problem !== null && (
@@ -812,6 +839,15 @@ export default function Welcome({
           {problem}
         </Banner>
       )}
+
+      {/*
+        First, above the archive cards. Helping BIC's archive survive is the one
+        thing on this screen that matters to somebody other than the person
+        looking at it, and it is the only thing most members will ever need to
+        do — so it should not be reachable only by scrolling past two cards
+        about making an archive of their own.
+      */}
+      <KeepArchiveAlive driftIsBehind={driftIsBehind} onOpenSettings={onOpenSettings} />
 
       <div className="choice-grid">
         <section className="choice choice-recommended">
@@ -837,6 +873,14 @@ export default function Welcome({
             />
             <p className="field-hint">Used for the folder listing and the backup file name.</p>
           </div>
+          {targetDir !== null && (
+            <p className="field-hint welcome-target">
+              It will be created here:{' '}
+              <code className="welcome-target-path" title={targetDir}>
+                {targetDir}
+              </code>
+            </p>
+          )}
           <div className="choice-foot">
             <button
               type="button"
@@ -844,7 +888,20 @@ export default function Welcome({
               onClick={() => void startNew()}
               disabled={working}
             >
-              Choose an empty folder…
+              Create the archive
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-quiet btn-block"
+              onClick={() => {
+                void (async () => {
+                  const picked = await askForFolder('Choose where to keep this archive')
+                  if (picked !== null) setChosenDir(picked)
+                })()
+              }}
+              disabled={working}
+            >
+              Put it somewhere else…
             </button>
           </div>
         </section>
@@ -867,13 +924,6 @@ export default function Welcome({
           </div>
         </section>
       </div>
-
-      {/*
-        The one thing on this screen that helps somebody other than the person
-        looking at it, so it sits directly under the two archive cards and gets a
-        card of its own.
-      */}
-      <KeepArchiveAlive driftIsBehind={driftIsBehind} onOpenSettings={onOpenSettings} />
 
       <div className="row row-between">
         <p className="small muted grow">

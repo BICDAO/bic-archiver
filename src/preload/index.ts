@@ -384,6 +384,13 @@ export interface ArchiverApi {
   checkDrift(opId?: string): Promise<IpcResult<DriftStatus>>
 
   // --- native pickers ------------------------------------------------------
+  /**
+   * `archive:suggestPath` — a ready-made folder path for a new archive, so a
+   * member never has to create one first. Does not touch the disk; the folder
+   * appears when the archive is actually created.
+   */
+  suggestArchivePath(name: string): Promise<IpcResult<string>>
+
   /** `dialog:pickDirectory` — resolves to null when the member cancels. */
   pickDirectory(options?: DialogOptions): Promise<IpcResult<string | null>>
   /** `dialog:saveCar` — resolves to null when the member cancels. */
@@ -539,6 +546,7 @@ const api: ArchiverApi = {
 
   checkDrift: (opId) => call<DriftStatus>('drift:check', { opId }),
 
+  suggestArchivePath: (name) => call<string>('archive:suggestPath', { name }),
   pickDirectory: (options) => call<string | null>('dialog:pickDirectory', options ?? {}),
   saveCar: (options) => call<string | null>('dialog:saveCar', options ?? {}),
   openCar: (options) => call<string | null>('dialog:openCar', options ?? {}),

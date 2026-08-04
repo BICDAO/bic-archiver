@@ -2921,3 +2921,37 @@ button.assets-stat:hover {
     animation: none;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Where a new archive will be created.
+
+   Shown instead of asking the member to make an empty folder first. The path
+   can be long, so it wraps on any character rather than forcing the card wide
+   or pushing the page into a horizontal scroll.
+   -------------------------------------------------------------------------- */
+
+.welcome-target {
+  margin-top: 0.25rem;
+}
+
+.welcome-target-path {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  color: var(--fg);
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn-quiet:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border, rgba(127, 127, 127, 0.35));
+}
