@@ -24,15 +24,83 @@ import { exporter, recursive } from 'ipfs-unixfs-exporter'
 /** dag-pb — the only codec that can be a UnixFS directory. Raw (0x55) never is. */
 const DAG_PB = 0x70
 
-import { importCar, openBlockstore, checkMany } from '../out-lib/index.js'
+import { importCar, openBlockstore, checkHealth, checkProviders } from '../out-lib/index.js'
+
+/**
+ * Two-phase sweep, because the obvious approach does not scale.
+ *
+ * `checkMany` spends five round trips per CID (one routing lookup plus a probe
+ * against each gateway) at four in flight. On a real 10,762-CID archive that
+ * measured 0.58 CIDs/s — over five hours.
+ *
+ * But the routing lookup alone settles the ~94% of CIDs that have providers:
+ * if somebody is announcing a copy, it is online and no probe adds anything.
+ * Only the zero-provider minority needs gateways, to tell "a cache is still
+ * answering" (at risk) from "nothing anywhere" (unreachable). That is one cheap
+ * request for almost everything and the expensive path for the few that matter.
+ */
+async function sweep(items, onResult, { concurrency = 24 } = {}) {
+  const results = new Array(items.length)
+  let next = 0
+
+  const worker = async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      const item = items[i]
+      let r
+      try {
+        const providers = await checkProviders(item.cid)
+        if (providers > 0) {
+          r = {
+            cid: item.cid,
+            label: item.label,
+            providers,
+            gateways: [],
+            verdict: 'healthy',
+            checkedAt: new Date().toISOString()
+          }
+        } else {
+          // Zero providers is not proof of death — a gateway cache may still
+          // be serving it. Pay for the full check only here.
+          r = await checkHealth(item.cid, item.label)
+        }
+      } catch (err) {
+        r = {
+          cid: item.cid,
+          label: item.label,
+          providers: 0,
+          gateways: [],
+          verdict: 'unreachable',
+          checkedAt: new Date().toISOString(),
+          error: String(err && err.message ? err.message : err)
+        }
+      }
+      results[i] = r
+      onResult(r)
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
+  return results
+}
 
 const argv = process.argv.slice(2)
 const carPath = argv.find((a) => !a.startsWith('--'))
 const doHealth = !argv.includes('--no-health')
 const jsonAt = argv.includes('--json') ? argv[argv.indexOf('--json') + 1] : null
+/**
+ * Checking every CID in a large archive is not practical interactively — a
+ * 20,000-file backup where the content is gone costs roughly eight seconds per
+ * lookup, which runs to hours. Sampling answers the question that actually
+ * matters ("is this archive still on the network at all?") in minutes.
+ */
+const sampleN = argv.includes('--sample') ? Number(argv[argv.indexOf('--sample') + 1]) : null
 
-if (!carPath) {
-  console.error('usage: node scripts/inspect-car.mjs <backup.car> [--no-health] [--json out.json]')
+if (!carPath || (sampleN !== null && !Number.isFinite(sampleN))) {
+  console.error(
+    'usage: node scripts/inspect-car.mjs <backup.car> [--no-health] [--sample N] [--json out.json]'
+  )
   process.exit(2)
 }
 
@@ -134,10 +202,23 @@ try {
       ...dirs.map((d) => ({ cid: d.cid, label: `${d.path}  (folder)` })),
       ...files.map((f) => ({ cid: f.cid, label: f.path }))
     ]
-    const unique = [...new Map(items.map((i) => [i.cid, i])).values()]
-    console.log(
-      `\nChecking ${unique.length.toLocaleString()} unique content IDs against the public network.`
-    )
+    const allUnique = [...new Map(items.map((i) => [i.cid, i])).values()]
+
+    // Deterministic even spread rather than a random draw, so a rerun is
+    // comparable and the sample is not clustered in one corner of the tree.
+    let unique = allUnique
+    if (sampleN !== null && sampleN < allUnique.length) {
+      const step = allUnique.length / sampleN
+      unique = Array.from({ length: sampleN }, (_, i) => allUnique[Math.floor(i * step)])
+      console.log(
+        `\nSampling ${unique.length.toLocaleString()} of ${allUnique.length.toLocaleString()} ` +
+          `unique content IDs, spread evenly through the archive.`
+      )
+    } else {
+      console.log(
+        `\nChecking ${unique.length.toLocaleString()} unique content IDs against the public network.`
+      )
+    }
     console.log('This asks whether anyone is still serving them — it does not re-upload anything.\n')
 
     let done = 0
@@ -145,7 +226,7 @@ try {
     let atRisk = 0
     let unreachable = 0
 
-    health = await checkMany(unique, (r) => {
+    health = await sweep(unique, (r) => {
       done += 1
       if (r.verdict === 'healthy') healthy += 1
       else if (r.verdict === 'at-risk') atRisk += 1
@@ -161,11 +242,26 @@ try {
     const dead = health.filter((h) => h.verdict === 'unreachable')
     const risky = health.filter((h) => h.verdict === 'at-risk')
 
+    const scope = unique.length === allUnique.length ? 'all' : 'sampled'
+    const pct = (n) => `${((n / unique.length) * 100).toFixed(1)}%`
+
     console.log('\n' + '='.repeat(72))
-    console.log(`  Online       ${healthy.toLocaleString()}`)
-    console.log(`  At risk      ${atRisk.toLocaleString()}   (served, but nobody announces a copy)`)
-    console.log(`  Unreachable  ${unreachable.toLocaleString()}   (nobody is serving these)`)
+    console.log(`  Online       ${String(healthy).padStart(6)}   ${pct(healthy)}`)
+    console.log(
+      `  At risk      ${String(atRisk).padStart(6)}   ${pct(atRisk)}   (served, but nobody announces a copy)`
+    )
+    console.log(
+      `  Unreachable  ${String(unreachable).padStart(6)}   ${pct(unreachable)}   (nobody is serving these)`
+    )
     console.log('='.repeat(72))
+    if (scope === 'sampled') {
+      console.log(
+        `\nThat is a sample of ${unique.length} from ${allUnique.length.toLocaleString()} content IDs.\n` +
+          `Read it as an estimate of the whole archive, not an exact count. Re-run\n` +
+          `without --sample for a definitive per-file answer (slow: dead lookups cost\n` +
+          `about eight seconds each).`
+      )
+    }
 
     if (dead.length > 0) {
       console.log(`\nUnreachable — present in this .car, absent from the network:`)
