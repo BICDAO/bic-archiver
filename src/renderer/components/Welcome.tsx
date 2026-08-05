@@ -282,6 +282,15 @@ function KeepArchiveAlive({
 }): ReactNode {
   const mirror = useMirrorRun()
   const setup = useNodeSetup()
+  /*
+   * Needed for `set`. The archive is a module-level store, and the shell decides
+   * what to draw from it — so a screen that builds an archive by calling the
+   * bridge directly has to push the new snapshot in. Skipping that leaves the
+   * store holding `null`, which the shell reads as "no archive open" and answers
+   * with this very screen: the job succeeds, 1.9 GB lands, and the member
+   * watches the button go back to how it was.
+   */
+  const archive = useArchive()
 
   const [status, setStatus] = useState<MirrorStatus | null>(null)
   const [capabilities, setCapabilities] = useState<MirrorCapability[] | null>(null)
@@ -333,12 +342,17 @@ function KeepArchiveAlive({
         }
 
         if (built.value.redundantCar !== undefined) onReclaim?.(built.value.redundantCar)
+
+        // Store first, then the view. Both land in one render, and doing it the
+        // other way round asks the shell to show the gallery of an archive it
+        // does not yet believe is open.
+        archive.set(built.value.snapshot)
         onOpened(built.value.snapshot, true, 'gallery')
       } finally {
         setBuilding(false)
       }
     },
-    [onOpened, onReclaim]
+    [archive, onOpened, onReclaim]
   )
 
   /** The same control wherever a copy exists; only the surrounding story differs. */
