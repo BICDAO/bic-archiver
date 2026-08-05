@@ -32,12 +32,13 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { stat, unlink } from 'node:fs/promises'
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { basename } from 'node:path'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { clearTimeout as clearTimer, setTimeout as setTimer } from 'node:timers'
 
 import { CID } from 'multiformats/cid'
@@ -71,6 +72,20 @@ export interface ImportCarResult {
   roots: string[]
   /** Blocks the node reports having taken in. */
   blocks: number
+}
+
+/** Options for {@link exportCarFromKubo}. */
+export interface ExportCarOptions {
+  /** Called with the running byte count, for a member watching a long job. */
+  onProgress?: (bytes: number) => void
+  /** Cancels the export; the partial file is removed rather than left behind. */
+  signal?: AbortSignal
+}
+
+/** What one `.car` export pulled out of the node. */
+export interface ExportCarResult {
+  /** Bytes written to disk. */
+  bytes: number
 }
 
 /** Options for {@link pinCid}. */
@@ -133,6 +148,15 @@ const SWARM_CONNECT_TIMEOUT_MS = 30_000
  */
 const IMPORT_IDLE_TIMEOUT_MS = 5 * 60_000
 const IMPORT_TOTAL_TIMEOUT_MS = 6 * 60 * 60_000
+
+/**
+ * The export is the same problem in reverse, and is timed the same way. The
+ * stall budget is the shorter of the two: a node reading its own repository has
+ * no network to wait for, so five minutes of complete silence means it is stuck,
+ * not slow.
+ */
+const EXPORT_IDLE_TIMEOUT_MS = 5 * 60_000
+const EXPORT_TOTAL_TIMEOUT_MS = 6 * 60 * 60_000
 
 /** Bytes read off disk per upload chunk. Bounds the memory the upload uses. */
 const UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -326,6 +350,89 @@ export async function importCarToKubo(
     upload.dispose()
     deadline.release()
   }
+}
+
+/**
+ * Ask the node for content it already holds, written straight to a `.car`.
+ *
+ * The mirror only writes a backup file when it had to *download* something. A
+ * member whose node already held the archive therefore finishes a mirror run
+ * with the content on their machine, in the node's repository, and no file
+ * anywhere that the archive can be built from. Their node is the only copy, so
+ * this asks it for the content back.
+ *
+ * Nothing is trusted on the way through — the bytes land as a `.car`, and the
+ * archive's own {@link importCar} hash-verifies every block as it reads them in.
+ * A node that returned the wrong bytes would fail there, not here.
+ *
+ * The response is never buffered: 1.8 GB is streamed to disk a chunk at a time,
+ * and each chunk restarts the stall clock, so a slow node is allowed to be slow
+ * while a wedged one is still abandoned.
+ *
+ * @throws {@link KuboError} — no node, node refused, or nothing written.
+ */
+export async function exportCarFromKubo(
+  apiUrl: string,
+  cid: string,
+  outPath: string,
+  opts: ExportCarOptions = {}
+): Promise<ExportCarResult> {
+  const endpoint = parseEndpoint(apiUrl)
+
+  let root: string
+  try {
+    root = CID.parse(cid.trim()).toString()
+  } catch {
+    throw new KuboError(
+      `"${cid}" is not a content address this app can read, so nothing could be asked for.`,
+      'config'
+    )
+  }
+
+  const deadline = createDeadline(EXPORT_TOTAL_TIMEOUT_MS, EXPORT_IDLE_TIMEOUT_MS, opts.signal)
+  let bytes = 0
+
+  try {
+    const response = await post(endpoint, KUBO_RPC.dagExport, { arg: root }, deadline)
+    await assertOk(response, endpoint, deadline)
+
+    const body = response.body
+    if (body === null) {
+      throw new KuboError(
+        'Your IPFS node took the request but sent nothing back, so no backup file was written.',
+        'rejected'
+      )
+    }
+
+    await pipeline(async function* () {
+      for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+        bytes += chunk.length
+        deadline.touch()
+        opts.onProgress?.(bytes)
+        yield chunk
+      }
+    }, createWriteStream(outPath))
+  } catch (err) {
+    // A half-written `.car` is worse than no file at all: it looks like a backup
+    // and cannot rebuild anything. Take it away rather than leave it to be found
+    // months later by someone who trusts it.
+    await unlink(outPath).catch(() => undefined)
+    if (err instanceof KuboError) throw err
+    throw transportError(err, endpoint, deadline)
+  } finally {
+    deadline.release()
+  }
+
+  if (bytes === 0) {
+    await unlink(outPath).catch(() => undefined)
+    throw new KuboError(
+      'Your IPFS node reported no content for that address, so there was nothing to save. It may ' +
+        'have been garbage-collected since it was pinned.',
+      'rejected'
+    )
+  }
+
+  return { bytes }
 }
 
 /**

@@ -134,6 +134,14 @@ export const DEFAULT_PINNING_SETTINGS: PinningSettings = {
 export const KUBO_RPC = {
   id: '/api/v0/id',
   dagImport: '/api/v0/dag/import',
+  /**
+   * The other direction: ask the node for content it already holds, as a `.car`.
+   *
+   * Needed because a member whose node already had the archive downloaded
+   * nothing, so there is no backup file to build an archive from. The node is
+   * the only copy on the machine, and this is how it is asked for it back.
+   */
+  dagExport: '/api/v0/dag/export',
   pinAdd: '/api/v0/pin/add',
   pinLs: '/api/v0/pin/ls',
   swarmConnect: '/api/v0/swarm/connect',

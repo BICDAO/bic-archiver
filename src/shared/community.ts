@@ -79,11 +79,29 @@ export interface MirrorResult {
   bytes: number
   /** True only when this machine now serves the content to other people. */
   nowServing: boolean
+  /**
+   * The `.car` this run wrote, when it wrote one.
+   *
+   * Every route that moves bytes goes through the same download, and that
+   * download ends by writing this file — the node route included, because the
+   * node is handed a `.car` rather than being asked to fetch 1.8 GB itself. So
+   * this is set for any member who has just copied the archive, whether or not
+   * they went on to serve it.
+   *
+   * It is absent in exactly one case: a node that already held the archive, so
+   * nothing was downloaded and nothing was written. Building an archive covers
+   * that by asking the node for the content back.
+   *
+   * Carried out to the GUI because it is the only thing that can turn a finished
+   * copy into an archive a member can actually look at.
+   */
+  carPath?: string
   /** Plain-English summary, safe to show anyone. */
   summary: string
   /** Plain-English problems; empty when everything worked. */
   errors: string[]
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* Gallery                                                                    */

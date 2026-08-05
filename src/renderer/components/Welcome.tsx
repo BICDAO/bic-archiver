@@ -43,7 +43,7 @@ import {
 } from 'react'
 
 import { BIC_ARCHIVE } from '../../shared/community'
-import type { MirrorCapability } from '../../shared/community'
+import type { MirrorCapability, MirrorResult } from '../../shared/community'
 import type { DriftStatus, ManagedNodeStatus, NodeInstallProgress } from '../../shared/node'
 import type { ArchiveSnapshot, MirrorStatus } from '../../preload'
 import { getApi, useArchive } from '../hooks'
@@ -270,11 +270,15 @@ function describeProviders(providers: number, keepingLocally: boolean): string {
  */
 function KeepArchiveAlive({
   driftIsBehind,
-  onOpenSettings
+  onOpenSettings,
+  onOpened,
+  onReclaim
 }: {
   /** From the drift check above: BIC has published a newer archive. */
   driftIsBehind: boolean
   onOpenSettings: () => void
+  onOpened: (snapshot: ArchiveSnapshot, isNew: boolean, target?: 'gallery') => void
+  onReclaim?: (car: { path: string; bytes: number }) => void
 }): ReactNode {
   const mirror = useMirrorRun()
   const setup = useNodeSetup()
@@ -284,6 +288,76 @@ function KeepArchiveAlive({
   const [node, setNode] = useState<ManagedNodeStatus | null>(null)
   const [checking, setChecking] = useState(true)
   const [autostartPending, setAutostartPending] = useState(false)
+
+  /* Building an archive out of the copy that has just landed. */
+  const [building, setBuilding] = useState(false)
+  const [buildProblem, setBuildProblem] = useState<string | null>(null)
+
+  /**
+   * Turn the finished copy into an archive, then show the member the pictures.
+   *
+   * This is the whole point of the copy as far as most people are concerned, and
+   * until now there was no way to get here: mirroring wrote blocks and a `.car`,
+   * the gallery reads an archive, and nothing joined the two. A member could
+   * hold every NFT the DAO owns and have no screen that would show them one.
+   *
+   * Offered whatever the run achieved, deliberately. Serving the archive is a
+   * separate and better outcome, but a copy that nobody can fetch is still a
+   * copy of every picture, and making the gallery wait for a working IPFS node
+   * would hide it from exactly the members most likely to give up on all of it.
+   */
+  const seeTheNfts = useCallback(
+    async (source: { rootCid: string; carPath?: string }) => {
+      setBuilding(true)
+      setBuildProblem(null)
+      try {
+        const api = getApi()
+
+        const where = await api.suggestArchivePath('BIC Archive')
+        if (!where.ok) {
+          setBuildProblem(where.error)
+          return
+        }
+
+        const built = await api.archiveFromMirror({
+          dir: where.value,
+          name: 'BIC Archive',
+          rootCid: source.rootCid,
+          // Absent when the node already held the archive and nothing was
+          // downloaded; the main process then asks the node for it instead.
+          ...(source.carPath === undefined ? {} : { carPath: source.carPath })
+        })
+        if (!built.ok) {
+          setBuildProblem(built.error)
+          return
+        }
+
+        if (built.value.redundantCar !== undefined) onReclaim?.(built.value.redundantCar)
+        onOpened(built.value.snapshot, true, 'gallery')
+      } finally {
+        setBuilding(false)
+      }
+    },
+    [onOpened, onReclaim]
+  )
+
+  /** The same control wherever a copy exists; only the surrounding story differs. */
+  const galleryButton = (source: { rootCid: string; carPath?: string }): ReactNode => (
+    <button
+      type="button"
+      className="btn btn-primary btn-sm"
+      onClick={() => void seeTheNfts(source)}
+      disabled={building}
+    >
+      {building ? 'Opening…' : 'See the NFTs'}
+    </button>
+  )
+
+  /** A finished run, as the button wants it. */
+  const fromResult = (result: MirrorResult): { rootCid: string; carPath?: string } => ({
+    rootCid: result.rootCid,
+    ...(result.carPath === undefined ? {} : { carPath: result.carPath })
+  })
 
   const mirrorFinishedAt = mirror.finishedAt
   const setupFinishedAt = setup.finishedAt
@@ -476,13 +550,17 @@ function KeepArchiveAlive({
             tone="ok"
             title="This computer is now serving the archive to other people"
             actions={
-              <button type="button" className="btn btn-sm" onClick={mirror.dismiss}>
-                Dismiss
-              </button>
+              <>
+                {galleryButton(fromResult(result))}
+                <button type="button" className="btn btn-sm" onClick={mirror.dismiss}>
+                  Dismiss
+                </button>
+              </>
             }
           >
             <div className="stack stack-sm">
               <p>{result.summary}</p>
+              {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
               {notes.length > 0 && (
                 <ul className="bullets">
                   {notes.map((note) => (
@@ -513,11 +591,15 @@ function KeepArchiveAlive({
           }
           actions={
             <>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={() => setup.start(true)}
-              >
+              {/*
+                First, and accented, even though serving the archive is the more
+                valuable outcome. A member who has just waited out 1.8 GB has
+                earned the sight of what they downloaded, and "set up IPFS" asks
+                them for yet another step before anything they can see. The
+                pictures are also the best argument for taking that step.
+              */}
+              {result.ok && galleryButton(fromResult(result))}
+              <button type="button" className="btn btn-sm" onClick={() => setup.start(true)}>
                 Set up IPFS so people can fetch it from you
               </button>
               <button type="button" className="btn btn-sm" onClick={mirror.dismiss}>
@@ -528,6 +610,7 @@ function KeepArchiveAlive({
         >
           <div className="stack stack-sm">
             <p>{result.summary}</p>
+            {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
             {result.ok && (
               <p className="small">
                 Nobody can fetch these files from you until this computer runs IPFS, so the copy
@@ -589,6 +672,26 @@ function KeepArchiveAlive({
           )}
 
           <p className="small muted">{describeProviders(providers, keepingLocally)}</p>
+
+          {/*
+            The member who mirrored weeks ago and came back. There is no finished
+            run to read a `.car` out of — there may never have been one — so the
+            content is pulled back out of their own node.
+
+            Gated on `keepingLocally` rather than `keeping`: a copy that exists
+            only on Pinata is not on this computer, and offering to open it would
+            be offering something that cannot work.
+          */}
+          {keepingLocally && status !== null && status.rootCid !== '' && (
+            <div className="stack stack-sm">
+              <div className="row">{galleryButton({ rootCid: status.rootCid })}</div>
+              <p className="small muted">
+                Builds an archive from the copy your node is already holding, so you can look
+                through what you are keeping. Nothing is downloaded again.
+              </p>
+              {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
+            </div>
+          )}
 
           {driftIsBehind && (
             <p className="small">
@@ -702,8 +805,19 @@ function KeepArchiveAlive({
 /* ========================================================================== */
 
 export interface WelcomeProps {
-  /** Called once an archive has been created or reopened. */
-  onOpened: (snapshot: ArchiveSnapshot, isNew: boolean) => void
+  /**
+   * Called once an archive has been created or reopened.
+   *
+   * `target` is only ever `'gallery'`, and only from the mirror flow: a member
+   * who has just copied the archive is sent to the pictures rather than to the
+   * empty token list they would otherwise land on.
+   */
+  onOpened: (snapshot: ArchiveSnapshot, isNew: boolean, target?: 'gallery') => void
+  /**
+   * A `.car` that has been folded into an archive and is now a duplicate. The
+   * shell makes the offer, because by then this screen is gone.
+   */
+  onReclaim?: (car: { path: string; bytes: number }) => void
   /** Show the app's settings, which this screen can reach with no archive open. */
   onOpenSettings: () => void
   /**
@@ -718,6 +832,7 @@ export interface WelcomeProps {
 
 export default function Welcome({
   onOpened,
+  onReclaim,
   onOpenSettings,
   onOpenHelp,
   onCancel
@@ -851,7 +966,12 @@ export default function Welcome({
         do — so it should not be reachable only by scrolling past two cards
         about making an archive of their own.
       */}
-      <KeepArchiveAlive driftIsBehind={driftIsBehind} onOpenSettings={onOpenSettings} />
+      <KeepArchiveAlive
+        driftIsBehind={driftIsBehind}
+        onOpenSettings={onOpenSettings}
+        onOpened={onOpened}
+        {...(onReclaim === undefined ? {} : { onReclaim })}
+      />
 
       <div className="choice-grid">
         {/*

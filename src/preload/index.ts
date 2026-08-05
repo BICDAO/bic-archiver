@@ -30,6 +30,7 @@ import type {
   MirrorResult
 } from '../shared/community'
 import type { DriftStatus, ManagedNodeStatus, NodeInstallProgress } from '../shared/node'
+import type { UpdateCheck } from '../shared/update'
 import type {
   AssetRow,
   PinProgress,
@@ -115,6 +116,35 @@ export interface ImportCarResult {
   blocks: number
 }
 
+/**
+ * What turning a finished mirror into a real archive produced.
+ *
+ * Mirroring and archiving were two halves that never met: a member who copied
+ * the archive had 1.8 GB of NFTs on disk and no way to look at any of them,
+ * because the gallery reads an *archive's* blockstore and the mirror writes to
+ * neither. This is the bridge.
+ */
+export interface ArchiveFromMirrorResult {
+  snapshot: ArchiveSnapshot
+  /** Where the archive was created. */
+  dir: string
+  /** The archive root the gallery will read. */
+  rootCid: string
+  /** How many blocks were folded in. */
+  blocks: number
+  /**
+   * The `.car` that is now redundant, and how big it is — absent when there is
+   * none to offer.
+   *
+   * Its blocks exist twice once the import finishes: once in the file, once in
+   * the archive's own blockstore, which can re-export a byte-identical file at
+   * any time from the Export screen. That makes the copy redundant rather than
+   * precious. It is still not this app's decision to delete 1.8 GB of somebody
+   * else's disk, so the size is reported and the member chooses.
+   */
+  redundantCar?: { path: string; bytes: number }
+}
+
 export interface HealthCheckResult {
   results: HealthResult[]
   /** True when the member pressed Stop before the sweep finished. */
@@ -155,6 +185,11 @@ export interface KuboImportResult {
  * is a real and common answer rather than a contradiction.
  */
 export interface MirrorStatus {
+  /**
+   * The archive address this verdict is about — the *published* one, resolved
+   * when the check ran, not the constant built into the app.
+   */
+  rootCid: string
   /** This computer's own IPFS node is keeping the archive. */
   pinnedLocally: boolean
   /** Pinata's own pin list contains it — verified, not assumed. */
@@ -210,6 +245,28 @@ export interface ArchiverApi {
   exportFolder(outDir: string, opId?: string): Promise<IpcResult<ExportFolderResult>>
   /** `import:car` — read someone else's `.car` backup into this archive. */
   importCar(inPath: string, opId?: string): Promise<IpcResult<ImportCarResult>>
+  /**
+   * `archive:fromMirror` — turn a finished mirror into an archive with a gallery.
+   *
+   * `carPath` is what the mirror reported writing. Leave it out when the run
+   * wrote no file — a node that already held the archive — and the content is
+   * asked back out of the node instead.
+   */
+  archiveFromMirror(
+    input: { dir: string; name?: string; rootCid: string; carPath?: string },
+    opId?: string
+  ): Promise<IpcResult<ArchiveFromMirrorResult>>
+  /** `mirror:discardCar` — delete a `.car` that has been folded into an archive. */
+  discardMirrorCar(path: string): Promise<IpcResult<null>>
+
+  // --- updates -------------------------------------------------------------
+  /**
+   * `update:check` — has a newer version been published?
+   *
+   * Reports only. Nothing is downloaded and nothing is installed; the result
+   * carries a version number and a link the member can choose to open.
+   */
+  checkForUpdates(opId?: string): Promise<IpcResult<UpdateCheck>>
 
   // --- pinning settings ----------------------------------------------------
   /**
@@ -514,6 +571,10 @@ const api: ArchiverApi = {
   exportCar: (outPath, opId) => call<ExportCarResult>('export:car', { outPath, opId }),
   exportFolder: (outDir, opId) => call<ExportFolderResult>('export:folder', { outDir, opId }),
   importCar: (inPath, opId) => call<ImportCarResult>('import:car', { inPath, opId }),
+  archiveFromMirror: (input, opId) =>
+    call<ArchiveFromMirrorResult>('archive:fromMirror', { ...input, opId }),
+  discardMirrorCar: (path) => call<null>('mirror:discardCar', { path }),
+  checkForUpdates: (opId) => call<UpdateCheck>('update:check', { opId }),
 
   getSettings: () => call<PinningSettings>('settings:get', {}),
   saveSettings: (settings) => call<PinningSettings>('settings:save', { settings }),

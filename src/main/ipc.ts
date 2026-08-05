@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { stat } from 'node:fs/promises'
+import { rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { CID } from 'multiformats/cid'
@@ -45,6 +45,7 @@ import type {
 import type {
   AddTokensResult,
   ArchiveSnapshot,
+  ArchiveFromMirrorResult,
   BuildRootResult,
   ExportCarResult,
   ExportFolderResult,
@@ -105,7 +106,7 @@ interface EngineRunOptions {
 /* ========================================================================== */
 
 import { buildAssetRows, mergeHealth, mergePinStates } from './pinning/assets'
-import { importCarToKubo, listPins } from './pinning/kubo'
+import { exportCarFromKubo, importCarToKubo, listPins } from './pinning/kubo'
 import { getTargets, pinAll, pinArchive } from './pinning/manager'
 import { listPinnedCids } from './pinning/pinata'
 import {
@@ -163,6 +164,8 @@ import {
 /* ========================================================================== */
 
 import { checkDrift, recordMirrored } from './community/drift'
+import { checkForUpdate } from './update'
+import type { UpdateCheck } from '../shared/update'
 import { disableAutostart, enableAutostart } from './node/autostart'
 import {
   getNodeStatus,
@@ -2194,6 +2197,175 @@ export function registerIpcHandlers(): void {
     )
   })
 
+  /**
+   * Turn a finished mirror into an archive a member can actually look at.
+   *
+   * The gap this closes: mirroring writes blocks into a scratch store, hands
+   * them to a node, and leaves a `.car` behind. None of that is an *archive*,
+   * and the gallery reads an archive's own blockstore — so a member who did the
+   * one thing the welcome screen asks of them ended up with 1.8 GB of NFTs on
+   * disk, no manifest, no root, and no screen that would show them any of it.
+   *
+   * Deliberately does not care whether the member is serving anything. A copy
+   * that nobody can fetch is still a copy of every picture the DAO owns, and
+   * making the gallery wait for a working IPFS node would hide the archive from
+   * exactly the members most likely to give up.
+   *
+   * Two sources, in order:
+   *
+   *  1. **The `.car` the mirror wrote.** Normal, and the fast path — the file is
+   *     already on disk and every block is hash-verified as it is read in.
+   *  2. **The node's own copy.** For a member whose node already held the
+   *     archive: nothing was downloaded, so there is no file. The content is
+   *     asked back out of the node into a scratch `.car`, which is then read in
+   *     exactly like the first case and deleted afterwards, because the member
+   *     never had that file and should not be left holding it.
+   */
+  handle<ArchiveFromMirrorResult>(
+    'archive:fromMirror',
+    'building an archive from your copy',
+    async (event, payload) => {
+      const dir = readPath(payload, 'dir', 'The folder to build the archive in')
+      const name = readOptionalString(payload, 'name') ?? 'BIC Archive'
+      const rootText = readString(payload, 'rootCid', 'The address of the copy')
+      const suppliedCar = readOptionalString(payload, 'carPath')
+
+      const rootCid = asCidString(rootText)
+      if (rootCid === null) {
+        throw plain(
+          `"${rootText}" is not a content address this app can read, so the copy could not be ` +
+            'turned into an archive.'
+        )
+      }
+
+      return withArchiveLock('building an archive from a copy', async () =>
+        runOperation(event, asRecord(payload)['opId'], 'building an archive', async (ctx) => {
+          await closeCurrentStore()
+
+          const created = await ArchiveStore.create(dir, name)
+          store = created
+          storeDir = dir
+          approvePath(dir)
+
+          /*
+           * A `.car` we fetched ourselves is scratch and is removed below. One
+           * the member already had is theirs, and is only ever *offered* for
+           * deletion.
+           */
+          let carPath = suppliedCar
+          let ours = false
+
+          if (carPath === undefined) {
+            const settings = await loadSettings()
+            const scratch = join(created.exportsDir, `mirror-${rootCid}.car`)
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'fetching-metadata',
+              message: 'Asking your IPFS node for the archive it is holding…',
+              detail: rootCid
+            })
+
+            await exportCarFromKubo(settings.kubo.apiUrl, rootCid, scratch, {
+              ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+              onProgress: (bytes: number) => {
+                ctx.progress({
+                  id: ctx.id,
+                  phase: 'fetching-metadata',
+                  message: `Reading the archive back from your node — ${formatBytes(bytes)} so far…`
+                })
+              }
+            })
+
+            carPath = scratch
+            ours = true
+          }
+
+          ctx.throwIfCancelled()
+          ctx.progress({
+            id: ctx.id,
+            phase: 'verifying',
+            message: 'Checking every piece of the copy and putting it into the archive…',
+            detail: carPath
+          })
+
+          const imported = await importCar(carPath, created.blockstore)
+          ctx.throwIfCancelled()
+
+          /*
+           * The root is recorded from the mirror rather than from the file's own
+           * declared roots. They are normally the same CID, but the mirror's is
+           * the one the DAO publishes and the one the drift check compares
+           * against — and a `.car` is allowed to declare none at all.
+           */
+          created.manifest.rootCid = rootCid
+          if (!Array.isArray(created.manifest.importedRoots)) created.manifest.importedRoots = []
+          if (!created.manifest.importedRoots.includes(rootCid)) {
+            created.manifest.importedRoots.push(rootCid)
+          }
+          touchManifest(created.manifest)
+          await created.save()
+
+          let redundantCar: { path: string; bytes: number } | undefined
+          if (ours) {
+            // Never the member's file — this one only ever existed to get the
+            // blocks out of the node, and its job is done.
+            await rm(carPath, { force: true }).catch(() => undefined)
+          } else {
+            const size = await stat(carPath).then(
+              (info) => info.size,
+              () => 0
+            )
+            if (size > 0) redundantCar = { path: carPath, bytes: size }
+          }
+
+          ctx.progress({
+            id: ctx.id,
+            phase: 'done',
+            message: 'Your copy is now an archive you can look through.',
+            progress: 1
+          })
+
+          return {
+            snapshot: snapshot(),
+            dir,
+            rootCid,
+            blocks: imported.blocks,
+            ...(redundantCar === undefined ? {} : { redundantCar })
+          }
+        })
+      )
+    }
+  )
+
+  /**
+   * Delete a `.car` the member has been told is redundant.
+   *
+   * Only ever reached from the offer made after an import, and only for a path
+   * this process already approved — a renderer bug must not be able to name an
+   * arbitrary file here and have it deleted.
+   */
+  handle<null>('mirror:discardCar', 'removing the copied backup file', async (_event, payload) => {
+    const target = readPath(payload, 'path', 'The backup file to remove')
+
+    // Deletion is the one thing in this file that cannot be undone, so it gets
+    // both gates: the path must be one this process itself produced or the
+    // member chose in a picker, and it must be a backup file. A renderer bug
+    // that named something else gets an error, not an erased folder.
+    if (!isApproved(target)) {
+      throw plain(
+        'That file was not one this app saved, so it will not be removed. You can delete it ' +
+          'yourself if you meant to.'
+      )
+    }
+    if (!target.toLowerCase().endsWith('.car')) {
+      throw plain('Only a .car backup file can be removed here.')
+    }
+
+    await rm(target, { force: true })
+    return null
+  })
+
   /* ---------------------------------------------------------------------- */
   /* Pinning settings                                                       */
   /* ---------------------------------------------------------------------- */
@@ -2948,6 +3120,25 @@ export function registerIpcHandlers(): void {
     approvePath(chosen)
     return chosen
   })
+
+  /* ---------------------------------------------------------------------- */
+  /* Updates                                                                */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Is there a newer BIC Archiver?
+   *
+   * Takes no payload beyond an `opId`, for the same reason `node:install` takes
+   * none: there is no field here that could name a URL, a repository or a
+   * version. The address is a constant, the answer is read but not trusted, and
+   * nothing is downloaded or run — the member is handed a version number and a
+   * link they can choose to follow.
+   */
+  handle<UpdateCheck>('update:check', 'checking for a newer version', async (event, payload) =>
+    runOperation(event, asRecord(payload)['opId'], 'checking for updates', async (ctx) =>
+      checkForUpdate(app.getVersion(), ctx.signal)
+    )
+  )
 
   /* ---------------------------------------------------------------------- */
   /* Shell                                                                  */

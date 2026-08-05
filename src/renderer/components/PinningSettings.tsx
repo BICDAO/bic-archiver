@@ -55,6 +55,7 @@ import {
   type PinTargetStatus,
   type PinningSettings as PinningSettingsValue
 } from '../../shared/pinning'
+import type { UpdateCheck as UpdateCheckResult } from '../../shared/update'
 /*
  * Type-only, and from `src/shared/node.ts` rather than from the preload bridge:
  * `../../preload` resolves to the preload *implementation*, which imports
@@ -149,6 +150,70 @@ function ExternalLink({ url, children }: { url: string; children: ReactNode }): 
     >
       {children}
     </button>
+  )
+}
+
+/**
+ * "Is this the current version?" — asked, answered, and left at that.
+ *
+ * Reporting rather than installing is a deliberate limit, not an unfinished
+ * feature: the app is not signed, so it has no safe way to replace itself, and a
+ * program that downloads and runs a new binary unprompted is the exact shape
+ * this project is careful about everywhere else. The member is told what is out
+ * there and given a link.
+ *
+ * The check never blocks anything and never nags — nothing here runs on its own,
+ * because a background call to GitHub on every launch is a fingerprint of every
+ * member's machine that nobody asked to leave.
+ */
+function UpdateCheck(): ReactNode {
+  const [checking, setChecking] = useState(false)
+  const [result, setResult] = useState<UpdateCheckResult | null>(null)
+
+  const check = useCallback(async () => {
+    setChecking(true)
+    const answer = await getApi().checkForUpdates()
+    setChecking(false)
+    setResult(
+      answer.ok
+        ? answer.value
+        : {
+            current: '',
+            latest: null,
+            newer: false,
+            summary: answer.error,
+            url: 'https://github.com/devanh/bic-archiver/releases/latest'
+          }
+    )
+  }, [])
+
+  return (
+    <Card title="This app">
+      <div className="stack stack-sm">
+        <div className="row">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void check()}
+            disabled={checking}
+          >
+            {checking ? 'Checking…' : 'Check for updates'}
+          </button>
+          {result !== null && result.newer && (
+            <ExternalLink url={result.url}>Get version {result.latest}</ExternalLink>
+          )}
+        </div>
+
+        {result !== null && (
+          <p className={result.newer ? undefined : 'small muted'}>{result.summary}</p>
+        )}
+
+        <p className="small faint">
+          Nothing is downloaded or installed by this check. It asks GitHub which version is newest
+          and tells you; fetching it is your decision, and you do it in your browser.
+        </p>
+      </div>
+    </Card>
   )
 }
 
@@ -1476,6 +1541,8 @@ export default function PinningSettings(): ReactNode {
           </dd>
         </dl>
       </Card>
+
+      <UpdateCheck />
     </div>
   )
 }
