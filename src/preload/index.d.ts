@@ -17,6 +17,8 @@ import type { ArchiverApi } from './index'
 
 export type {
   AddTokensResult,
+  ArchiveFromMirrorResult,
+  ArchiveOnDisk,
   ArchiveSnapshot,
   ArchiverApi,
   BuildRootResult,
@@ -49,6 +51,14 @@ export type {
   MirrorProgress,
   MirrorResult
 } from '../shared/community'
+
+/**
+ * The update-check shape, re-exported for the same reason as the rest.
+ *
+ * `UPDATE_SOURCE` is a *value* and is deliberately not here: the window has no
+ * business naming where an update is looked for.
+ */
+export type { UpdateCheck } from '../shared/update'
 
 /**
  * The managed-node and drift shapes come from `src/shared/node.ts`, re-exported

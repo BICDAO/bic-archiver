@@ -122,6 +122,14 @@ export interface MirrorOptions {
 
 /** What {@link checkMirrorStatus} found. */
 export interface MirrorStatus {
+  /**
+   * The archive address this verdict is about.
+   *
+   * Carried out so the GUI can act on the same root the check used rather than
+   * the constant compiled into the app, which goes stale the moment BIC
+   * publishes an update. Empty only when no usable address was given.
+   */
+  rootCid: string
   /** The member's own IPFS node is keeping the archive. */
   pinnedLocally: boolean
   /** Pinata's own pin list contains the archive — verified, not assumed. */
@@ -576,7 +584,7 @@ export async function checkMirrorStatus(
 
   const wanted = rootCid.trim()
   if (wanted === '') {
-    return { pinnedLocally: false, pinnedOnPinata: false, providers: 0 }
+    return { rootCid: '', pinnedLocally: false, pinnedOnPinata: false, providers: 0 }
   }
 
   const locally = async (): Promise<boolean> => {
@@ -599,7 +607,7 @@ export async function checkMirrorStatus(
     checkProviders(wanted, signal)
   ])
 
-  return { pinnedLocally, pinnedOnPinata, providers }
+  return { rootCid: wanted, pinnedLocally, pinnedOnPinata, providers }
 }
 
 /**
@@ -848,6 +856,10 @@ export async function mirrorArchive(opts: MirrorOptions): Promise<MirrorResult> 
     blocks,
     bytes,
     nowServing,
+    // Carried out so the GUI can offer to open what was just copied. Until this
+    // was returned the renderer had no way to know a 1.8 GB backup was sitting
+    // next to it, which is why a member who mirrored could not reach the gallery.
+    ...(carPath === undefined ? {} : { carPath }),
     summary,
     errors: dedupe(errors)
   }

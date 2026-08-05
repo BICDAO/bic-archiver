@@ -46,7 +46,7 @@ import HealthView from './components/HealthView'
 import Help from './components/Help'
 import PinningSettings from './components/PinningSettings'
 import Welcome from './components/Welcome'
-import { formatCount } from './components/Layout'
+import { Banner, formatBytes, formatCount } from './components/Layout'
 
 /* ========================================================================== */
 /* Navigation                                                                 */
@@ -247,6 +247,27 @@ export default function App(): ReactNode {
   const [switching, setSwitching] = useState(false)
   const [view, setView] = useState<ViewId>('archive')
 
+  /*
+   * Set when an archive was just built out of a mirror, and the `.car` it was
+   * built from is now a second copy of the same 1.8 GB. Offered here rather than
+   * on the welcome screen because by the time it is true the member has already
+   * been sent to the gallery — telling them about it on a screen they have left
+   * would be telling nobody.
+   */
+  const [reclaim, setReclaim] = useState<{ path: string; bytes: number } | null>(null)
+  const [reclaiming, setReclaiming] = useState(false)
+
+  const freeSpace = useCallback(async () => {
+    if (reclaim === null) return
+    setReclaiming(true)
+    const result = await window.api.discardMirrorCar(reclaim.path)
+    setReclaiming(false)
+    // Either way the offer goes: it succeeded, or the file is not ours to
+    // remove and repeating the offer would just fail again.
+    setReclaim(null)
+    if (!result.ok) window.console.warn(result.error)
+  }, [reclaim])
+
   const snapshot = archive.snapshot
   const booting = !archive.ready
   const hasArchive = snapshot !== null
@@ -293,8 +314,19 @@ export default function App(): ReactNode {
     }
   }, [hasArchive, archive])
 
-  const opened = useCallback((next: ArchiveSnapshot, isNew: boolean) => {
+  /*
+   * `target` is how a screen that knows where the member was heading says so.
+   * The mirror flow uses it: somebody who has just copied 1.8 GB of NFTs and
+   * pressed "See the NFTs" wants the pictures, and the default landing — Add
+   * NFTs, because the token list is empty — would be the app answering a
+   * question they did not ask. Everything else keeps the old behaviour.
+   */
+  const opened = useCallback((next: ArchiveSnapshot, isNew: boolean, target?: ViewId) => {
     setSwitching(false)
+    if (target !== undefined) {
+      setView(target)
+      return
+    }
     setView(isNew || next.manifest.tokens.length === 0 ? 'add' : 'archive')
   }, [])
 
@@ -343,6 +375,7 @@ export default function App(): ReactNode {
         ) : (
           <Welcome
             onOpened={opened}
+            onReclaim={setReclaim}
             onOpenSettings={() => setView('settings')}
             onOpenHelp={() => setView('help')}
             onCancel={snapshot === null ? undefined : () => setSwitching(false)}
@@ -408,6 +441,33 @@ export default function App(): ReactNode {
 
       <main className="main">
         <div className="main-scroll" ref={scrollRef}>
+          {reclaim !== null && (
+            <div className="view" style={{ marginBottom: 22 }}>
+              <Banner
+                tone="info"
+                title={`${formatBytes(reclaim.bytes)} of this copy is now stored twice`}
+                actions={
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void freeSpace()}
+                      disabled={reclaiming}
+                    >
+                      {reclaiming ? 'Removing…' : `Free up ${formatBytes(reclaim.bytes)}`}
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={() => setReclaim(null)}>
+                      Keep both
+                    </button>
+                  </>
+                }
+              >
+                The archive now holds every piece of the backup file it was built from, so the file
+                itself is a duplicate. Removing it changes nothing about what you have or what you
+                are sharing — Export can write an identical one back out whenever you want it.
+              </Banner>
+            </div>
+          )}
           <div hidden={view !== 'add'}>
             <AddTokensView onAdded={() => setView('archive')} onNeedArchive={switchArchive} />
           </div>
