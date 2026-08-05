@@ -18,6 +18,7 @@ import type { ArchiverApi } from './index'
 export type {
   AddTokensResult,
   ArchiveFromMirrorResult,
+  ArchiveOnDisk,
   ArchiveSnapshot,
   ArchiverApi,
   BuildRootResult,

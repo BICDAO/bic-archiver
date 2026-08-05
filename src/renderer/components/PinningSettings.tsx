@@ -65,6 +65,8 @@ import type { UpdateCheck as UpdateCheckResult } from '../../shared/update'
  * deliberately never named here.
  */
 import type { ManagedNodeStatus, NodeInstallProgress } from '../../shared/node'
+/* Type-only, and erased at build time, for exactly the reason set out above. */
+import type { ArchiveOnDisk } from '../../preload'
 import { getApi, useAsyncAction } from '../hooks'
 import { Cid } from './Cid'
 import { Banner, Card, Pill, ProgressBar, ViewHeader, formatBytes, type Tone } from './Layout'
@@ -150,6 +152,163 @@ function ExternalLink({ url, children }: { url: string; children: ReactNode }): 
     >
       {children}
     </button>
+  )
+}
+
+/**
+ * Copies of the same archive, and a way to get the disk back.
+ *
+ * "See the NFTs" takes about half a minute and looks idle while it works, which
+ * is exactly long enough for somebody to press it again — and each press used to
+ * build another complete 1.9 GB archive. That is prevented now (a second press
+ * opens what the first one built), but anyone who already did it is holding
+ * several gigabytes of the same thing and has no way to see that, because
+ * nothing in the app ever listed the archives it had made.
+ *
+ * Two deliberate limits. It only ever lists archives *this app* created in its
+ * own folder — an archive kept somewhere else is the member's business — and the
+ * archive currently open can never be removed, so there is no way to delete the
+ * floor you are standing on.
+ */
+function ArchiveCopies(): ReactNode {
+  const [copies, setCopies] = useState<ArchiveOnDisk[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setBusy(true)
+    setProblem(null)
+    const answer = await getApi().listArchiveCopies()
+    setBusy(false)
+    if (!answer.ok) {
+      setProblem(answer.error)
+      return
+    }
+    setCopies(answer.value)
+  }, [])
+
+  const remove = useCallback(
+    async (dir: string) => {
+      setRemoving(dir)
+      setProblem(null)
+      const answer = await getApi().removeArchive(dir)
+      setRemoving(null)
+      if (!answer.ok) {
+        setProblem(answer.error)
+        return
+      }
+      await load()
+    },
+    [load]
+  )
+
+  /*
+   * Duplicates are the point, so they are named as such: two archives sharing a
+   * root hold the same bytes twice. Anything with its own root is a different
+   * archive and is only listed, never suggested for removal.
+   */
+  const duplicated = new Set(
+    (copies ?? [])
+      .filter((copy) => copy.rootCid !== '')
+      .map((copy) => copy.rootCid)
+      .filter((root, _index, all) => all.filter((other) => other === root).length > 1)
+  )
+
+  const reclaimable = (copies ?? [])
+    .filter((copy) => !copy.open && duplicated.has(copy.rootCid))
+    .reduce((sum, copy) => sum + copy.bytes, 0)
+
+  return (
+    <Card title="Copies of your archives">
+      <div className="stack stack-sm">
+        <p className="small muted">
+          Every archive this app has made on this computer, and how much room each one takes. Only
+          these are listed — an archive you keep somewhere else is yours and is left alone.
+        </p>
+
+        <div className="row">
+          <button type="button" className="btn" onClick={() => void load()} disabled={busy}>
+            {busy ? 'Looking…' : copies === null ? 'Show my archives' : 'Refresh'}
+          </button>
+          {reclaimable > 0 && (
+            <span className="small">
+              {formatBytes(reclaimable)} is the same content stored more than once.
+            </span>
+          )}
+        </div>
+
+        {problem !== null && (
+          <Banner tone="danger" title="That did not work">
+            {problem}
+          </Banner>
+        )}
+
+        {copies !== null && copies.length === 0 && (
+          <p className="small muted">This app has not made any archives on this computer yet.</p>
+        )}
+
+        {copies !== null && copies.length > 0 && (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Archive</th>
+                <th>Holds</th>
+                <th>Size</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {copies.map((copy) => {
+                const duplicate = duplicated.has(copy.rootCid)
+                return (
+                  <tr key={copy.dir}>
+                    <td>
+                      <div>{copy.name}</div>
+                      <div className="small faint" title={copy.dir}>
+                        {copy.dir}
+                      </div>
+                    </td>
+                    <td className="small">
+                      {copy.rootCid === '' ? (
+                        <Pill tone="warn">Never assembled</Pill>
+                      ) : duplicate ? (
+                        <Pill tone="warn">Same as another</Pill>
+                      ) : (
+                        <Pill tone="ok">Its own</Pill>
+                      )}
+                      {copy.open && <span className="small faint"> open now</span>}
+                    </td>
+                    <td className="small">{formatBytes(copy.bytes)}</td>
+                    <td>
+                      {copy.open ? (
+                        <span className="small faint">In use</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => void remove(copy.dir)}
+                          disabled={removing !== null}
+                          title={`Delete ${copy.dir}`}
+                        >
+                          {removing === copy.dir ? 'Removing…' : 'Remove'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+
+        <p className="small faint">
+          Removing a copy deletes that folder and everything in it. If another archive here holds
+          the same content, nothing is lost — and if it is the last one, you can build it again from
+          the welcome screen or from your .car backup.
+        </p>
+      </div>
+    </Card>
   )
 }
 
@@ -1541,6 +1700,8 @@ export default function PinningSettings(): ReactNode {
           </dd>
         </dl>
       </Card>
+
+      <ArchiveCopies />
 
       <UpdateCheck />
     </div>

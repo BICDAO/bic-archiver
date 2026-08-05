@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { rm, stat } from 'node:fs/promises'
+import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { CID } from 'multiformats/cid'
@@ -46,6 +46,7 @@ import type {
   AddTokensResult,
   ArchiveSnapshot,
   ArchiveFromMirrorResult,
+  ArchiveOnDisk,
   BuildRootResult,
   ExportCarResult,
   ExportFolderResult,
@@ -1333,6 +1334,107 @@ function withNote(status: ManagedNodeStatus, note: string): ManagedNodeStatus {
  */
 const approvedPaths = new Set<string>()
 
+/* ========================================================================== */
+/* Archives this app made itself                                              */
+/* ========================================================================== */
+
+/**
+ * Where archives the app creates on a member's behalf go.
+ *
+ * One place, and only this place, is treated as "ours": it is the folder the
+ * mirror button builds into, and it is the only folder {@link removeArchive} is
+ * willing to delete from. An archive a member made somewhere else is theirs, and
+ * this app will not tidy it up.
+ */
+function archivesBaseDir(): string {
+  return join(app.getPath('documents'), 'BIC Archives')
+}
+
+/** Bytes under a folder. Walks rather than guesses; a blockstore is many files. */
+async function folderBytes(dir: string): Promise<number> {
+  let total = 0
+  try {
+    const entries = await readdir(dir, { recursive: true, withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      try {
+        total += (await stat(join(entry.parentPath, entry.name))).size
+      } catch {
+        // A file that vanished mid-walk is not worth failing a size estimate for.
+      }
+    }
+  } catch {
+    return 0
+  }
+  return total
+}
+
+/**
+ * Every archive the app has built in its own folder.
+ *
+ * Reads each manifest directly rather than opening the archives: opening one
+ * would swap the member's current archive out from under them, which is a
+ * remarkable thing for "list what is on disk" to do.
+ */
+async function listOwnArchives(): Promise<ArchiveOnDisk[]> {
+  const base = archivesBaseDir()
+
+  let entries: string[]
+  try {
+    entries = (await readdir(base, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    return []
+  }
+
+  const found: ArchiveOnDisk[] = []
+  for (const entry of entries) {
+    const dir = join(base, entry)
+    let manifest: Record<string, unknown>
+    try {
+      const parsed: unknown = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'))
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue
+      manifest = parsed as Record<string, unknown>
+    } catch {
+      // Not an archive, or damaged beyond reading. Either way it is not ours to
+      // list as one, and certainly not to offer for deletion.
+      continue
+    }
+
+    const root = asCidString(manifest['rootCid'])
+    const tokens = Array.isArray(manifest['tokens']) ? manifest['tokens'].length : 0
+
+    found.push({
+      dir,
+      name: typeof manifest['name'] === 'string' ? manifest['name'] : entry,
+      rootCid: root ?? '',
+      tokens,
+      bytes: await folderBytes(dir),
+      open: storeDir !== null && resolve(storeDir) === resolve(dir)
+    })
+  }
+
+  return found
+}
+
+/**
+ * An archive we have already built for this root, if there is one.
+ *
+ * This is what stops a member who presses "See the NFTs" twice from owning the
+ * same 1.9 GB twice. Only a *complete* archive counts — one whose root matches
+ * and whose blocks are actually on disk — because reusing an interrupted attempt
+ * would hand somebody an empty gallery and call it done.
+ */
+async function findBuiltArchive(rootCid: string): Promise<string | null> {
+  for (const archive of await listOwnArchives()) {
+    if (archive.rootCid !== rootCid) continue
+    if (archive.bytes < 1024) continue
+    return archive.dir
+  }
+  return null
+}
+
 function approvePath(target: string): void {
   const absolute = resolve(target)
   approvedPaths.add(absolute)
@@ -2240,6 +2342,34 @@ export function registerIpcHandlers(): void {
 
       return withArchiveLock('building an archive from a copy', async () =>
         runOperation(event, asRecord(payload)['opId'], 'building an archive', async (ctx) => {
+          /*
+           * Already done this? Open it instead of doing it again.
+           *
+           * Pressing the button twice is not a mistake anybody should pay 1.9 GB
+           * for, and it is easy to do — the first run takes half a minute, which
+           * is exactly long enough to wonder whether the click registered. The
+           * caller proposes a fresh folder every time (it has to; it cannot know
+           * what is already there), so this is the only place the question can
+           * be asked.
+           */
+          const built = await findBuiltArchive(rootCid)
+          if (built !== null) {
+            await closeCurrentStore()
+            store = await ArchiveStore.open(built)
+            storeDir = built
+            approvePath(built)
+
+            ctx.progress({
+              id: ctx.id,
+              phase: 'done',
+              message: 'You already have this archive on this computer — opening it.',
+              progress: 1,
+              detail: built
+            })
+
+            return { snapshot: snapshot(), dir: built, rootCid, blocks: 0 }
+          }
+
           await closeCurrentStore()
 
           const created = await ArchiveStore.create(dir, name)
@@ -3060,7 +3190,7 @@ export function registerIpcHandlers(): void {
   handle<string>('archive:suggestPath', 'working out where to put the archive', async (_event, payload) => {
     const raw = readOptionalString(payload, 'name') ?? ''
     const folder = sanitizeFolderName(raw, 'DAO archive')
-    const base = join(app.getPath('documents'), 'BIC Archives')
+    const base = archivesBaseDir()
 
     let candidate = join(base, folder)
     for (let n = 2; n < 100; n += 1) {
@@ -3119,6 +3249,59 @@ export function registerIpcHandlers(): void {
     if (chosen === undefined) return null
     approvePath(chosen)
     return chosen
+  })
+
+  /* ---------------------------------------------------------------------- */
+  /* Archives on disk                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Every archive this app has built in its own folder, with sizes.
+   *
+   * Exists so a member can be shown that they are holding the same 1.9 GB more
+   * than once. Read-only, and deliberately does not open anything.
+   */
+  handle<ArchiveOnDisk[]>('archive:copies', 'looking at the archives on this computer', async () =>
+    listOwnArchives()
+  )
+
+  /**
+   * Delete one whole archive folder.
+   *
+   * The most destructive thing in this file by a wide margin — it removes a
+   * folder, not a file — so it is fenced on four sides:
+   *
+   *  1. it must sit directly inside the app's own archives folder, so an archive
+   *     a member keeps somewhere else can never be named here;
+   *  2. it must actually be an archive, proven by reading its manifest;
+   *  3. it must not be the archive currently open, because deleting the floor
+   *     somebody is standing on produces a very confusing app;
+   *  4. the window has to name it explicitly — nothing here deletes a set.
+   */
+  handle<null>('archive:remove', 'removing that archive', async (_event, payload) => {
+    const target = readPath(payload, 'dir', 'The archive folder to remove')
+    const base = archivesBaseDir()
+
+    if (dirname(resolve(target)) !== resolve(base)) {
+      throw plain(
+        'That folder is not one of the archives this app made, so it will not be removed. You can ' +
+          'delete it yourself if you meant to.'
+      )
+    }
+
+    if (storeDir !== null && resolve(storeDir) === resolve(target)) {
+      throw plain(
+        'That is the archive you have open. Open a different one first, then remove this copy.'
+      )
+    }
+
+    const known = await listOwnArchives()
+    if (!known.some((archive) => resolve(archive.dir) === resolve(target))) {
+      throw plain('That folder does not hold an archive, so it will not be removed.')
+    }
+
+    await rm(target, { recursive: true, force: true })
+    return null
   })
 
   /* ---------------------------------------------------------------------- */

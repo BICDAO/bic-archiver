@@ -117,6 +117,24 @@ export interface ImportCarResult {
 }
 
 /**
+ * One archive folder as it sits on disk, in the app's own archives folder.
+ *
+ * Reported so a member can see when they are holding the same 1.9 GB more than
+ * once — which is easy to end up with, because the button that builds one takes
+ * half a minute and looks idle while it works.
+ */
+export interface ArchiveOnDisk {
+  dir: string
+  name: string
+  /** Empty when the archive has never been assembled into a backup folder. */
+  rootCid: string
+  tokens: number
+  bytes: number
+  /** True when this is the archive currently open. It can never be removed. */
+  open: boolean
+}
+
+/**
  * What turning a finished mirror into a real archive produced.
  *
  * Mirroring and archiving were two halves that never met: a member who copied
@@ -258,6 +276,17 @@ export interface ArchiverApi {
   ): Promise<IpcResult<ArchiveFromMirrorResult>>
   /** `mirror:discardCar` — delete a `.car` that has been folded into an archive. */
   discardMirrorCar(path: string): Promise<IpcResult<null>>
+
+  // --- archives on disk ----------------------------------------------------
+  /** `archive:copies` — every archive this app built, with sizes. Read-only. */
+  listArchiveCopies(): Promise<IpcResult<ArchiveOnDisk[]>>
+  /**
+   * `archive:remove` — delete one whole archive folder.
+   *
+   * Refused for anything outside the app's own archives folder, anything that
+   * is not an archive, and the archive currently open.
+   */
+  removeArchive(dir: string): Promise<IpcResult<null>>
 
   // --- updates -------------------------------------------------------------
   /**
@@ -574,6 +603,8 @@ const api: ArchiverApi = {
   archiveFromMirror: (input, opId) =>
     call<ArchiveFromMirrorResult>('archive:fromMirror', { ...input, opId }),
   discardMirrorCar: (path) => call<null>('mirror:discardCar', { path }),
+  listArchiveCopies: () => call<ArchiveOnDisk[]>('archive:copies', {}),
+  removeArchive: (dir) => call<null>('archive:remove', { dir }),
   checkForUpdates: (opId) => call<UpdateCheck>('update:check', { opId }),
 
   getSettings: () => call<PinningSettings>('settings:get', {}),

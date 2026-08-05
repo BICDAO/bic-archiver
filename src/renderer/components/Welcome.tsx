@@ -51,10 +51,12 @@ import DriftBanner, { RunReadout, startMirrorRun, useMirrorRun } from './DriftBa
 import {
   Banner,
   Card,
+  OperationStatus,
   Pill,
   formatBytes,
   formatCount,
-  isCancellation
+  isCancellation,
+  useOperation
 } from './Layout'
 
 /* ========================================================================== */
@@ -298,9 +300,15 @@ function KeepArchiveAlive({
   const [checking, setChecking] = useState(true)
   const [autostartPending, setAutostartPending] = useState(false)
 
-  /* Building an archive out of the copy that has just landed. */
-  const [building, setBuilding] = useState(false)
-  const [buildProblem, setBuildProblem] = useState<string | null>(null)
+  /*
+   * Building an archive out of the copy that has just landed.
+   *
+   * A real operation rather than a boolean, because this is a ~30 second job on
+   * 1.9 GB and a button that only says "Opening…" for half a minute is
+   * indistinguishable from one that has hung. The engine already narrates each
+   * step; this is what puts that narration on screen, with a Stop that works.
+   */
+  const buildOp = useOperation()
 
   /**
    * Turn the finished copy into an archive, then show the member the pictures.
@@ -317,53 +325,60 @@ function KeepArchiveAlive({
    */
   const seeTheNfts = useCallback(
     async (source: { rootCid: string; carPath?: string }) => {
-      setBuilding(true)
-      setBuildProblem(null)
-      try {
-        const api = getApi()
-
-        const where = await api.suggestArchivePath('BIC Archive')
-        if (!where.ok) {
-          setBuildProblem(where.error)
-          return
-        }
-
-        const built = await api.archiveFromMirror({
-          dir: where.value,
-          name: 'BIC Archive',
-          rootCid: source.rootCid,
-          // Absent when the node already held the archive and nothing was
-          // downloaded; the main process then asks the node for it instead.
-          ...(source.carPath === undefined ? {} : { carPath: source.carPath })
-        })
-        if (!built.ok) {
-          setBuildProblem(built.error)
-          return
-        }
-
-        if (built.value.redundantCar !== undefined) onReclaim?.(built.value.redundantCar)
-
-        // Store first, then the view. Both land in one render, and doing it the
-        // other way round asks the shell to show the gallery of an archive it
-        // does not yet believe is open.
-        archive.set(built.value.snapshot)
-        onOpened(built.value.snapshot, true, 'gallery')
-      } finally {
-        setBuilding(false)
+      const where = await getApi().suggestArchivePath('BIC Archive')
+      if (!where.ok) {
+        buildOp.fail(where.error)
+        return
       }
+
+      const built = await buildOp.run({
+        start: 'Putting your copy together — this usually takes about half a minute…',
+        body: (opId) =>
+          getApi().archiveFromMirror(
+            {
+              dir: where.value,
+              name: 'BIC Archive',
+              rootCid: source.rootCid,
+              // Absent when the node already held the archive and nothing was
+              // downloaded; the main process then asks the node for it instead.
+              ...(source.carPath === undefined ? {} : { carPath: source.carPath })
+            },
+            opId
+          )
+      })
+      if (built === null) return
+
+      if (built.redundantCar !== undefined) onReclaim?.(built.redundantCar)
+
+      /*
+       * Store first, then the view. Both land in one render, and doing it the
+       * other way round asks the shell to show the gallery of an archive it does
+       * not yet believe is open — which is not a cosmetic problem: the shell
+       * reads a null store as "no archive", so the member is returned to this
+       * screen and every sign of the work disappears.
+       */
+      archive.set(built.snapshot)
+      onOpened(built.snapshot, true, 'gallery')
     },
-    [archive, onOpened, onReclaim]
+    [archive, buildOp, onOpened, onReclaim]
   )
 
-  /** The same control wherever a copy exists; only the surrounding story differs. */
+  /**
+   * The same control wherever a copy exists; only the surrounding story differs.
+   *
+   * The wait is stated before the click rather than after, for the same reason
+   * the 1.8 GB is: half a minute of nothing is long enough to conclude the app
+   * has died, and a member who was told to expect it waits instead.
+   */
   const galleryButton = (source: { rootCid: string; carPath?: string }): ReactNode => (
     <button
       type="button"
       className="btn btn-primary btn-sm"
       onClick={() => void seeTheNfts(source)}
-      disabled={building}
+      disabled={buildOp.busy}
+      title="Takes about half a minute — the whole archive is checked on the way in"
     >
-      {building ? 'Opening…' : 'See the NFTs'}
+      {buildOp.busy ? 'Opening…' : 'See the NFTs (about 30 seconds)'}
     </button>
   )
 
@@ -574,7 +589,7 @@ function KeepArchiveAlive({
           >
             <div className="stack stack-sm">
               <p>{result.summary}</p>
-              {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
+              <OperationStatus op={buildOp} />
               {notes.length > 0 && (
                 <ul className="bullets">
                   {notes.map((note) => (
@@ -624,7 +639,7 @@ function KeepArchiveAlive({
         >
           <div className="stack stack-sm">
             <p>{result.summary}</p>
-            {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
+            <OperationStatus op={buildOp} />
             {result.ok && (
               <p className="small">
                 Nobody can fetch these files from you until this computer runs IPFS, so the copy
@@ -703,7 +718,7 @@ function KeepArchiveAlive({
                 Builds an archive from the copy your node is already holding, so you can look
                 through what you are keeping. Nothing is downloaded again.
               </p>
-              {buildProblem !== null && <p className="small muted">{buildProblem}</p>}
+              <OperationStatus op={buildOp} />
             </div>
           )}
 
