@@ -133,6 +133,13 @@ jobs:
         # CSC_IDENTITY_AUTO_DISCOVERY=false stops electron-builder from hunting
         # the runner's keychain for an identity it will not find.
         #
+        # The Mac app is still AD-HOC signed: package.json build.mac sets
+        # "identity": "-" and "hardenedRuntime": false. That needs no certificate
+        # and no secret. It only seals the bundle. Without it the arm64 app keeps
+        # Electron's linker-only signature, which no longer matches the renamed
+        # bundle, and Apple silicon refuses it as "damaged and can't be opened"
+        # with no Open Anyway. Ad-hoc signed, it gets the prompt described above.
+        #
         # `--publish never` and the absence of GH_TOKEN here are deliberate:
         # electron-builder publishes by itself when it sees a token on a tag
         # build, which would race the explicit upload steps below and could
