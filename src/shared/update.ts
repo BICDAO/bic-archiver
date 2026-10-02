@@ -49,13 +49,22 @@ export interface UpdateCheck {
   url: string
 }
 
-/** `v1.2.3` / `1.2.3` / `1.2.3-beta.1` → the three numbers, or `null`. */
+/**
+ * `v1.2.3` / `1.2.3` / `1.2.3-beta.1` → the three numbers, or `null`.
+ *
+ * A tag that stops early counts its missing parts as 0: `v0.4` is 0.4.0 and
+ * `v1` is 1.0.0. Releases have been tagged that way (0.3.0 went out as `v0.3`),
+ * and refusing the short form left the check unable to see them. Nothing else
+ * is loosened: digits only, one to three parts, at most six digits each.
+ */
 export function parseVersion(value: unknown): [number, number, number] | null {
   if (typeof value !== 'string') return null
-  const match = /^\s*v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:[-+].*)?\s*$/.exec(value)
+  const match = /^\s*v?(\d{1,6})(?:\.(\d{1,6})(?:\.(\d{1,6}))?)?(?:[-+].*)?\s*$/.exec(value)
   if (match === null) return null
 
-  const parts = [match[1], match[2], match[3]].map((part) => Number.parseInt(part ?? '', 10))
+  const parts = [match[1], match[2] ?? '0', match[3] ?? '0'].map((part) =>
+    Number.parseInt(part ?? '', 10)
+  )
   if (parts.some((part) => !Number.isInteger(part))) return null
   return [parts[0] as number, parts[1] as number, parts[2] as number]
 }
