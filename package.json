@@ -60,7 +60,9 @@
         "dmg"
       ],
       "category": "public.app-category.utilities",
-      "icon": "resources/icon.icns"
+      "icon": "resources/icon.icns",
+      "identity": "-",
+      "hardenedRuntime": false
     },
     "win": {
       "target": [
