@@ -341,7 +341,7 @@ function UpdateCheck(): ReactNode {
             latest: null,
             newer: false,
             summary: answer.error,
-            url: 'https://github.com/devanh/bic-archiver/releases/latest'
+            url: 'https://github.com/BICDAO/bic-archiver/releases/latest'
           }
     )
   }, [])

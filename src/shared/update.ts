@@ -22,9 +22,9 @@ export const UPDATE_SOURCE = {
    * and none is needed. Returns the newest release that is neither a draft nor a
    * pre-release, which is exactly the set members should be offered.
    */
-  latest: 'https://api.github.com/repos/devanh/bic-archiver/releases/latest',
+  latest: 'https://api.github.com/repos/BICDAO/bic-archiver/releases/latest',
   /** Where a member goes to fetch it. Not taken from the API response. */
-  releases: 'https://github.com/devanh/bic-archiver/releases/latest'
+  releases: 'https://github.com/BICDAO/bic-archiver/releases/latest'
 } as const
 
 /** How long to wait before deciding GitHub is not going to answer. */
