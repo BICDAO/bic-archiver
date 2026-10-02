@@ -21,9 +21,23 @@ export const UPDATE_SOURCE = {
    * Public and unauthenticated — the repository is public, so no token is sent
    * and none is needed. Returns the newest release that is neither a draft nor a
    * pre-release, which is exactly the set members should be offered.
+   *
+   * Addressed by the repository's permanent numeric ID (1321647482 is
+   * BICDAO/bic-archiver), not by its name. A name only points somewhere for as
+   * long as nobody reuses it: after a rename or a transfer, GitHub forwards the
+   * old name until someone creates a repository with that name, and from then
+   * on every copy still asking by the old name hears from them. This repository
+   * has already moved once. The ID survives renames and transfers, and a new
+   * repository can never take it, so whatever happens to names, this only ever
+   * hears about versions published here.
    */
-  latest: 'https://api.github.com/repos/BICDAO/bic-archiver/releases/latest',
-  /** Where a member goes to fetch it. Not taken from the API response. */
+  latest: 'https://api.github.com/repositories/1321647482/releases/latest',
+  /**
+   * Where a member goes to fetch it. Not taken from the API response. This is
+   * still a name, but it only matters when a member chooses to follow it. A
+   * repository that borrows a name can never be the one announcing an update,
+   * because announcements come from `latest`, by ID.
+   */
   releases: 'https://github.com/BICDAO/bic-archiver/releases/latest'
 } as const
 
