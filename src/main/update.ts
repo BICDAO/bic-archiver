@@ -11,7 +11,13 @@
  * over a question they asked idly.
  */
 
-import { UPDATE_SOURCE, UPDATE_TIMEOUT_MS, isNewer, type UpdateCheck } from '../shared/update.js'
+import {
+  UPDATE_SOURCE,
+  UPDATE_TIMEOUT_MS,
+  isNewer,
+  parseVersion,
+  type UpdateCheck
+} from '../shared/update.js'
 
 const USER_AGENT = 'bic-archiver (update check)'
 
@@ -82,8 +88,12 @@ export async function checkForUpdate(current: string, signal?: AbortSignal): Pro
       return { ...base, summary: 'GitHub did not say which version is newest, so nothing changed.' }
     }
 
+    // Both tests, not one. The first keeps what is shown on screen to plain
+    // characters; the second is the version grammar itself. Without the second,
+    // a tag the parser could not read was reported as "you are running the
+    // newest version" — the wrong sentence.
     const latest = tag.trim().replace(/^v/, '')
-    if (!/^[\w.+-]{1,40}$/.test(latest)) {
+    if (!/^[\w.+-]{1,40}$/.test(latest) || parseVersion(latest) === null) {
       return { ...base, summary: 'GitHub named a version this app could not read, so nothing changed.' }
     }
 

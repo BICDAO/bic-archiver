@@ -340,7 +340,11 @@ not in that file, or a call without a timeout, is a bug.
 ## Cut a release
 
 1. Bump `version` in `package.json`, commit.
-2. `git tag v0.2.0 && git push origin main --tags`.
+2. Tag it `v` + that exact version, all three parts — `v0.4.0`, not `v0.4`:
+   `git tag v0.4.0 && git push origin main --tags`. The in-app update check compares
+   this tag with the running version. It reads a short tag (`v0.4` as 0.4.0), but
+   anything else — `V0.4`, `release-0.4`, `v0.4.0.0` — is never offered to members;
+   the check reports that it could not read the version.
 3. `.github/workflows/build.yml` runs typecheck/test/build, then builds the macOS
    `.dmg` and the Windows NSIS installer and attaches both to a **draft** GitHub
    release for that tag.
