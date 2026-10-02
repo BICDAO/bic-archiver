@@ -200,3 +200,15 @@ describe('checkForUpdate — the sentence a member is shown', () => {
     expect(result.url).toBe(UPDATE_SOURCE.releases)
   })
 })
+
+describe('UPDATE_SOURCE — who the check listens to', () => {
+  // After a rename or a transfer, anyone who creates a repository under the old
+  // name takes over that name. Nobody can take over the numeric ID. Every copy
+  // shipped keeps this address forever, so pin it here: a later edit must not
+  // quietly put the check back on a name.
+  it('asks by the repository ID, not by a name', () => {
+    expect(UPDATE_SOURCE.latest).toBe(
+      'https://api.github.com/repositories/1321647482/releases/latest'
+    )
+  })
+})
