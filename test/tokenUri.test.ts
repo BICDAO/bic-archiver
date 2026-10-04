@@ -13,8 +13,14 @@
 import { Buffer } from 'node:buffer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { SELECTOR_TOKEN_URI, SELECTOR_URI } from '../src/shared/constants'
-import { resolveTokenUri } from '../src/main/chain/tokenUri'
+import {
+  SELECTOR_TOKEN_CONTENT_HASHES,
+  SELECTOR_TOKEN_METADATA_HASHES,
+  SELECTOR_TOKEN_METADATA_URI,
+  SELECTOR_TOKEN_URI,
+  SELECTOR_URI
+} from '../src/shared/constants'
+import { resolveTokenMetadataUri, resolveTokenUri } from '../src/main/chain/tokenUri'
 import type { TokenRef } from '../src/shared/types'
 import { abiEncodeString, makeRpcStub } from './helpers/support'
 
@@ -282,5 +288,145 @@ describe('resolveTokenUri — ERC-1155 {id} substitution', () => {
 
     await resolveTokenUri(ref('1', 'erc1155'))
     expect(stub.calls[0]?.startsWith(SELECTOR_URI)).toBe(true)
+  })
+})
+
+describe('resolveTokenMetadataUri — Zora v1 Media keeps the metadata at a second link', () => {
+  const ZORA_MEDIA = '0xabefbc9fd2f806065b4f3c237d4b59d9a97bcac7'
+
+  /*
+   * Captured live on 2026-10-04: `eth_call` against Zora's v1 Media contract for
+   * token 3366 through https://ethereum-rpc.publicnode.com. `tokenURI` gave the
+   * PNG; `tokenMetadataURI` gave the JSON. Both hashes are the SHA-256 of the
+   * files those links serve, checked against copies fetched by CID.
+   */
+  const LIVE_TOKEN_URI_3366 =
+    '0x' +
+    '0000000000000000000000000000000000000000000000000000000000000020' +
+    '0000000000000000000000000000000000000000000000000000000000000056' +
+    '68747470733a2f2f697066732e666c65656b2e636f2f697066732f6261667962' +
+    '6569656a76376f337a7163697a696f336a70636335676575636476636937336b' +
+    '6c6d66376b617a797a7076797035716e36346e79346100000000000000000000'
+  const LIVE_METADATA_URI_3366 =
+    '0x' +
+    '0000000000000000000000000000000000000000000000000000000000000020' +
+    '0000000000000000000000000000000000000000000000000000000000000056' +
+    '68747470733a2f2f697066732e666c65656b2e636f2f697066732f6261667962' +
+    '656966747a616b61726a6163637277776b336b67646e7873753365367962326d' +
+    '797275776775347a3568726d686534657066626b796100000000000000000000'
+  const LIVE_CONTENT_HASH_3366 = '0x719265be92e8968a3ccff31e2300ac9be2f76e5cb4d622e57228c3534538765d'
+  const LIVE_METADATA_HASH_3366 = '0x9813da96e18221082811af4db66e40456b2d895c134f02cc96d6526f996252e5'
+
+  function zora(): TokenRef {
+    return { chainId: 1, contract: ZORA_MEDIA, tokenId: '3366', standard: 'erc721' }
+  }
+
+  /** Answers the four Zora calls with the captured payloads; refuses anything else. */
+  function zoraStub(
+    overrides: Record<string, string | { revert: string }> = {}
+  ): ReturnType<typeof makeRpcStub> {
+    const answers: Record<string, string | { revert: string }> = {
+      [SELECTOR_TOKEN_URI]: LIVE_TOKEN_URI_3366,
+      [SELECTOR_TOKEN_METADATA_URI]: LIVE_METADATA_URI_3366,
+      [SELECTOR_TOKEN_CONTENT_HASHES]: LIVE_CONTENT_HASH_3366,
+      [SELECTOR_TOKEN_METADATA_HASHES]: LIVE_METADATA_HASH_3366,
+      ...overrides
+    }
+    return makeRpcStub((data) => answers[data.slice(0, 10)] ?? { revert: 'function does not exist' })
+  }
+
+  it('reads the metadata link and both mint-time hashes from the captured live answers', async () => {
+    const stub = zoraStub()
+    vi.stubGlobal('fetch', stub.fetch)
+
+    const link = await resolveTokenMetadataUri(zora())
+
+    expect(link).toBeDefined()
+    expect(link?.metadataUri.raw).toBe(
+      'https://ipfs.fleek.co/ipfs/bafybeiftzakarjaccrwwk3kgdnxsu3e6yb2myruwgu4z5hrmhe4epfbkya'
+    )
+    // The dead fleek gateway doesn't matter: the CID is read out of the link.
+    expect(link?.metadataUri.kind).toBe('ipfs')
+    expect(link?.metadataUri.ipfsPath).toEqual({
+      cid: 'bafybeiftzakarjaccrwwk3kgdnxsu3e6yb2myruwgu4z5hrmhe4epfbkya',
+      path: ''
+    })
+    expect(link?.contentSha256).toBe('719265be92e8968a3ccff31e2300ac9be2f76e5cb4d622e57228c3534538765d')
+    expect(link?.metadataSha256).toBe('9813da96e18221082811af4db66e40456b2d895c134f02cc96d6526f996252e5')
+
+    // Token 3366 is 0xd26, encoded as one 32-byte word after each selector.
+    const word = `${'0'.repeat(61)}d26`
+    expect(stub.calls).toEqual([
+      SELECTOR_TOKEN_METADATA_URI + word,
+      SELECTOR_TOKEN_CONTENT_HASHES + word,
+      SELECTOR_TOKEN_METADATA_HASHES + word
+    ])
+  })
+
+  it('while tokenURI on the same contract is the artwork, not the metadata', async () => {
+    vi.stubGlobal('fetch', zoraStub().fetch)
+
+    const resolved = await resolveTokenUri(zora())
+    expect(resolved.ipfsPath?.cid).toBe('bafybeiejv7o3zqcizio3jpcc5geucdvci73klmf7kazyzpvyp5qn64ny4a')
+  })
+
+  it('returns nothing, after one call, for an ordinary ERC-721 that refuses the question', async () => {
+    const stub = erc721Returning('ipfs://QmeSjSinHpPnmXmspMjwiXyN6zS4E9zccariGR3jxcaWtq/1')
+    vi.stubGlobal('fetch', stub.fetch)
+
+    expect(await resolveTokenMetadataUri(ref('1', 'erc721'))).toBeUndefined()
+    expect(stub.calls).toHaveLength(1)
+    expect(stub.calls[0]?.startsWith(SELECTOR_TOKEN_METADATA_URI)).toBe(true)
+  })
+
+  it('returns nothing when the contract answers with an empty link', async () => {
+    vi.stubGlobal('fetch', zoraStub({ [SELECTOR_TOKEN_METADATA_URI]: abiEncodeString('') }).fetch)
+    expect(await resolveTokenMetadataUri(zora())).toBeUndefined()
+  })
+
+  it('returns nothing for a contract whose fallback answers every call with no data', async () => {
+    vi.stubGlobal('fetch', makeRpcStub(() => '0x').fetch)
+    expect(await resolveTokenMetadataUri(zora())).toBeUndefined()
+  })
+
+  it('returns nothing for a link of a kind this app cannot open, rather than failing the token', async () => {
+    vi.stubGlobal(
+      'fetch',
+      zoraStub({ [SELECTOR_TOKEN_METADATA_URI]: abiEncodeString('ftp://files.example.com/3366.json') }).fetch
+    )
+    expect(await resolveTokenMetadataUri(zora())).toBeUndefined()
+  })
+
+  it('leaves out a hash that is all zeros or that the contract refuses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      zoraStub({
+        [SELECTOR_TOKEN_CONTENT_HASHES]: `0x${'0'.repeat(64)}`,
+        [SELECTOR_TOKEN_METADATA_HASHES]: { revert: 'nope' }
+      }).fetch
+    )
+
+    const link = await resolveTokenMetadataUri(zora())
+    expect(link?.metadataUri.kind).toBe('ipfs')
+    expect(link).not.toHaveProperty('contentSha256')
+    expect(link).not.toHaveProperty('metadataSha256')
+  })
+
+  it('never throws, even when no Ethereum service answers', async () => {
+    // The offline guard is still in place here, so every request rejects.
+    expect(await resolveTokenMetadataUri(zora())).toBeUndefined()
+  })
+
+  it('asks nothing for an address that is not one, or for another network', async () => {
+    const stub = zoraStub()
+    vi.stubGlobal('fetch', stub.fetch)
+
+    expect(
+      await resolveTokenMetadataUri({ chainId: 1, contract: 'zora.eth', tokenId: '1', standard: 'erc721' })
+    ).toBeUndefined()
+    expect(
+      await resolveTokenMetadataUri({ chainId: 137, contract: ZORA_MEDIA, tokenId: '1', standard: 'erc721' })
+    ).toBeUndefined()
+    expect(stub.calls).toHaveLength(0)
   })
 })

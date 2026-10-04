@@ -214,6 +214,35 @@ decoded in-process. That removes the step where a member pastes a blob into a ra
 online decoder — which was, incidentally, the least safe thing in the whole manual
 procedure.
 
+### Zora v1: the token URI is the picture
+
+Zora's original (v1) Media contract, `0xabefbc9fd2f806065b4f3c237d4b59d9a97bcac7`,
+breaks the rule that `tokenURI` leads to the metadata. It stores two links per token.
+`tokenURI` is the artwork file itself. `tokenMetadataURI` is a small JSON
+file with `name`, `description`, `mimeType` and `version`, and no `image` field. The
+contract also stores the SHA-256 of each file, set once at mint
+(`tokenContentHashes`, `tokenMetadataHashes`). The token's owner, or anyone they
+approve, can later point either link somewhere new, but nothing changes the hashes.
+
+So once `tokenURI` has answered as an ERC-721, `resolveTokenMetadataUri()` also asks
+for `tokenMetadataURI(id)`:
+
+```
+0x157c3df9    tokenMetadataURI(uint256)
+0xfad32197    tokenContentHashes(uint256)    → bytes32
+0x01ddc3b5    tokenMetadataHashes(uint256)   → bytes32
+```
+
+Almost every contract refuses that one extra call, and archiving carries on exactly as
+before. When a contract answers, the archiver reads the metadata from the second link
+and saves the `tokenURI` file as `image`, or as `animation` when the metadata's
+`mimeType` is a video, sound or 3D type. It then compares each file with the hash the
+contract recorded. A file that does not match is still kept, because it is what the
+contract points at today, but the token is marked partly saved and the reason is
+given. The provenance record carries both links (`tokenUri`, `metadataUri`) and the
+recorded hashes (`contractSha256`). If the metadata file cannot be downloaded, the
+artwork is still archived, since it has an address of its own.
+
 ---
 
 ## 4. Directory link ordering must be canonical
@@ -282,6 +311,23 @@ locally. Hence the client-side dag-pb decoding.
 `tokenURI(uint256)` on a live ERC-721 returned
 `ipfs://QmeSjSinHpPnmXmspMjwiXyN6zS4E9zccariGR3jxcaWtq/1` with no "Read as Proxy"
 equivalent step.
+
+**Zora v1 Media keeps a token's metadata apart from its artwork.** Checked
+2026-10-04 with `eth_call` through `https://ethereum-rpc.publicnode.com`, token 3366 on
+`0xabefbc9fd2f806065b4f3c237d4b59d9a97bcac7` (its `name()` is `Zora`):
+`tokenURI` returned
+`https://ipfs.fleek.co/ipfs/bafybeiejv7o3zqcizio3jpcc5geucdvci73klmf7kazyzpvyp5qn64ny4a`,
+the PNG, and `tokenMetadataURI` returned
+`https://ipfs.fleek.co/ipfs/bafybeiftzakarjaccrwwk3kgdnxsu3e6yb2myruwgu4z5hrmhe4epfbkya`,
+the JSON. Both files, fetched by CID from `gateway.pinata.cloud`, hash to exactly the
+values `tokenContentHashes` (`719265be…765d`) and `tokenMetadataHashes` (`9813da96…52e5`)
+returned. The JSON has `description`, `mimeType`, `name` and `version`, and no `image`.
+Token 5941's metadata has the same four keys with `mimeType` `video/mp4`. `ipfs.fleek.co`
+answered 522 for both of token 3366's files that day, which does not matter: the CID is
+read out of the link. In Zora's published source (`ourzora/core`,
+`contracts/Media.sol`), the two hashes are set only in `_mintForCreator`, while
+`updateTokenURI` and `updateTokenMetadataURI` let the owner or an approved address
+change the links.
 
 **Delegated routing gives a usable liveness signal.**
 `https://delegated-ipfs.dev/routing/v1/providers/{cid}` returns `{"Providers":[…]}`

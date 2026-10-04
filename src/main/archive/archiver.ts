@@ -43,7 +43,12 @@ import type {
   ResolvedTokenUri,
   TokenRef
 } from '../../shared/types.js'
-import { parseIpfsUri, resolveTokenUri } from '../chain/tokenUri.js'
+import {
+  parseIpfsUri,
+  resolveTokenMetadataUri,
+  resolveTokenUri,
+  type TokenMetadataLink
+} from '../chain/tokenUri.js'
 import { checkHealth } from '../health/check.js'
 import { getBlockBytes, hasBlock, type Blockstore } from '../ipfs/blockstore.js'
 import { buildDirectory, cumulativeSize, listDirectory } from '../ipfs/dag.js'
@@ -224,13 +229,20 @@ function makeEmit(id: string, onProgress: (event: ProgressEvent) => void): Emit 
  * Archive one token: read its `tokenURI`, fetch its metadata and every asset the
  * metadata points at, and store the whole thing as a folder of IPFS blocks.
  *
+ * A contract built like Zora's original (v1) Media contract answers
+ * `tokenMetadataURI` as well. Its `tokenURI` is then the artwork rather than
+ * the metadata, so the metadata comes from the second link and the `tokenURI`
+ * file is saved as the token's image or animation, picked by the metadata's
+ * `mimeType`. Both files are checked against the SHA-256 fingerprints the
+ * contract recorded at mint.
+ *
  * The token is saved into `store` before this resolves, so an interrupted batch
  * still leaves everything that finished.
  *
  * Assets are best-effort: an image that has fallen off the network is recorded
  * as a plain-English problem and the token comes back with `status: 'partial'`.
  * Only failures that leave nothing worth keeping — the contract will not answer,
- * or the metadata itself is gone — throw.
+ * or the metadata itself is gone and the artwork has no link of its own — throw.
  *
  * @throws An `Error` with `name === 'ArchiverError'` and a message safe to show
  * a member verbatim. It may carry a `partial` property holding the half-built
@@ -266,7 +278,21 @@ export async function archiveToken(
   }
 
   throwIfCancelled(signal)
-  emit('resolving', `The collection says it is ${describeTokenUri(tokenUri)}.`, 0.08)
+
+  // Zora's original Media contract keeps the metadata at a second link, and
+  // its `tokenURI` is the artwork itself. Every other contract refuses the
+  // question, and everything below then carries on exactly as before.
+  const split = await readSeparateMetadataLink(ref, tokenUri)
+
+  throwIfCancelled(signal)
+  emit(
+    'resolving',
+    split === undefined
+      ? `The collection says it is ${describeTokenUri(tokenUri)}.`
+      : `The collection keeps this token's information ${describeTokenUri(split.metadataUri)}, and the ` +
+          `artwork itself ${describeTokenUri(tokenUri)}.`,
+    0.08
+  )
 
   const token: ArchivedToken = {
     ref,
@@ -279,12 +305,21 @@ export async function archiveToken(
     archivedAt
   }
 
+  if (split !== undefined) {
+    token.metadataUri = split.metadataUri
+    const recorded: { content?: string; metadata?: string } = {}
+    if (split.contentSha256 !== undefined) recorded.content = split.contentSha256
+    if (split.metadataSha256 !== undefined) recorded.metadata = split.metadataSha256
+    if (Object.keys(recorded).length > 0) token.contractSha256 = recorded
+  }
+
   // --- 2. Fetch the metadata ------------------------------------------------
 
   emit('fetching-metadata', "Downloading the token's information…", 0.12)
 
-  const metadataTarget = targetFromTokenUri(tokenUri)
-  let metadataBytes: Uint8Array
+  const metadataSource = split?.metadataUri ?? tokenUri
+  const metadataTarget = targetFromTokenUri(metadataSource)
+  let metadataBytes: Uint8Array | undefined
 
   try {
     const resource = await fetchResource('metadata', metadataTarget, blockstore, signal, emit)
@@ -293,34 +328,56 @@ export async function archiveToken(
   } catch (err) {
     if (isCancellation(err)) throw err
     const message = `The information for token ${ref.tokenId} could not be downloaded. ${messageOf(err)}`
-    token.status = 'failed'
     token.errors.push(message)
-    emit('error', message)
-    throw fatal(message, token)
+    if (split === undefined) {
+      token.status = 'failed'
+      emit('error', message)
+      throw fatal(message, token)
+    }
+    // The artwork has a link of its own, so losing the description is no
+    // reason to lose the artwork too.
+    token.status = 'partial'
+    emit(
+      'fetching-metadata',
+      `${message} The artwork has its own address, so it is still being archived.`,
+      0.24
+    )
   }
 
-  emit(
-    'fetching-metadata',
-    `Got the token's information (${formatBytes(token.metadata?.bytes ?? 0)}).`,
-    0.24
-  )
+  if (metadataBytes !== undefined) {
+    emit(
+      'fetching-metadata',
+      `Got the token's information (${formatBytes(token.metadata?.bytes ?? 0)}).`,
+      0.24
+    )
+  }
+
+  if (token.metadata !== undefined && split?.metadataSha256 !== undefined) {
+    const where = { emit, phase: 'fetching-metadata', progress: 0.25 } as const
+    checkContractSha256(token, token.metadata, split.metadataSha256, 'token information', where)
+  }
 
   // --- 3. Read the name out of the metadata ---------------------------------
 
-  const parsed = parseMetadataJson(metadataBytes)
+  const parsed: ParsedMetadata =
+    metadataBytes === undefined ? { problem: 'it could not be downloaded' } : parseMetadataJson(metadataBytes)
 
-  if (parsed.json === undefined) {
+  if (metadataBytes !== undefined && parsed.json === undefined) {
     const message =
-      tokenUri.kind === 'data'
-        ? "This token's information is stored on-chain but is not readable as JSON, so no name or images " +
-          'could be read from it. The information itself has still been archived exactly as the contract ' +
-          'returned it.'
-        : `This token's information was downloaded but could not be read as JSON, so no name or images ` +
-          `could be found in it. It has still been archived exactly as it was served. (${parsed.problem})`
+      split !== undefined
+        ? `This token's information was downloaded but could not be read as JSON, so its name and ` +
+          'description could not be read. It has still been archived exactly as it was served, and the ' +
+          `artwork, which has its own address, is archived beside it. (${parsed.problem})`
+        : tokenUri.kind === 'data'
+          ? "This token's information is stored on-chain but is not readable as JSON, so no name or images " +
+            'could be read from it. The information itself has still been archived exactly as the contract ' +
+            'returned it.'
+          : `This token's information was downloaded but could not be read as JSON, so no name or images ` +
+            `could be found in it. It has still been archived exactly as it was served. (${parsed.problem})`
     token.status = 'partial'
     token.errors.push(message)
     emit('fetching-metadata', message, 0.26)
-  } else {
+  } else if (parsed.json !== undefined) {
     token.metadataJson = parsed.json
   }
 
@@ -329,8 +386,9 @@ export async function archiveToken(
 
   // --- 4. Fetch every asset the metadata points at --------------------------
 
-  const assetUrls = parsed.json === undefined ? [] : extractAssetUrls(parsed.json)
-  const context = assetContext(tokenUri, metadataTarget)
+  const listed = parsed.json === undefined ? [] : extractAssetUrls(parsed.json)
+  const assetUrls: PlannedAsset[] = split === undefined ? listed : withArtwork(listed, tokenUri, parsed.json)
+  const context = assetContext(metadataSource, metadataTarget)
 
   if (assetUrls.length > MAX_ASSETS_PER_TOKEN) {
     const message =
@@ -363,7 +421,8 @@ export async function archiveToken(
 
     let target: FetchTarget
     try {
-      target = targetFromAssetUrl(asset.url, context)
+      target =
+        asset.isArtwork === true ? targetFromTokenUri(tokenUri) : targetFromAssetUrl(asset.url, context)
     } catch (err) {
       if (isCancellation(err)) throw err
       const message = `The ${describeRole(asset.role)} could not be archived. ${messageOf(err)}`
@@ -373,8 +432,9 @@ export async function archiveToken(
       continue
     }
 
+    let resource: FetchedResource
     try {
-      token.assets[asset.role] = await fetchResource(asset.role, target, blockstore, signal, emit)
+      resource = await fetchResource(asset.role, target, blockstore, signal, emit)
     } catch (err) {
       if (isCancellation(err)) throw err
       // One missing image must never cost a member the rest of the token.
@@ -382,7 +442,21 @@ export async function archiveToken(
       token.status = 'partial'
       token.errors.push(message)
       emit('fetching-assets', message, share)
+      continue
     }
+
+    if (asset.isArtwork === true) {
+      // A bare IPFS address carries no file extension to guess a type from,
+      // but the metadata says what was minted.
+      const mimeType = mimeTypeOf(parsed.json)
+      if (resource.contentType === undefined && mimeType !== undefined) resource.contentType = mimeType
+      if (split?.contentSha256 !== undefined) {
+        const where = { emit, phase: 'fetching-assets', progress: share } as const
+        checkContractSha256(token, resource, split.contentSha256, describeRole(asset.role), where)
+      }
+    }
+
+    token.assets[asset.role] = resource
   }
 
   // --- 5. Build this token's folder ----------------------------------------
@@ -787,6 +861,89 @@ function targetFromTokenUri(tokenUri: ResolvedTokenUri): FetchTarget {
   }
 
   return { kind: 'http', url, sourceUrl: tokenUri.raw }
+}
+
+/**
+ * One file to fetch for a token: a link found in its metadata, or — for a
+ * contract that keeps the two apart — the artwork its `tokenURI` points at.
+ */
+interface PlannedAsset {
+  role: string
+  url: string
+  /** True for the `tokenURI` file of a contract like Zora v1 Media. */
+  isArtwork?: boolean
+}
+
+/**
+ * The separate metadata link, when this token's contract has one.
+ *
+ * Only an ERC-721 is asked. Zora's v1 Media contract is one, and asking every
+ * ERC-1155 as well would cost each of them a request for nothing. A contract
+ * whose two links are the same address is treated like any other contract.
+ */
+async function readSeparateMetadataLink(
+  ref: TokenRef,
+  tokenUri: ResolvedTokenUri
+): Promise<TokenMetadataLink | undefined> {
+  if (ref.standard !== 'erc721') return undefined
+  const link = await resolveTokenMetadataUri(ref)
+  if (link === undefined) return undefined
+  if (link.metadataUri.raw.trim() === tokenUri.raw.trim()) return undefined
+  return link
+}
+
+/**
+ * Put the `tokenURI` file first in the list of files to fetch.
+ *
+ * Zora v1 metadata has no `image` field. The artwork is the `tokenURI` file,
+ * and the metadata's `mimeType` says what kind of file it is. Anything the
+ * metadata does list is still fetched; a role it shares with the artwork gets
+ * a `_2` suffix, the way {@link extractAssetUrls} numbers repeats.
+ */
+function withArtwork(
+  listed: Array<{ role: string; url: string }>,
+  tokenUri: ResolvedTokenUri,
+  json: Record<string, unknown> | undefined
+): PlannedAsset[] {
+  const artwork: PlannedAsset = {
+    role: artworkRoleFor(mimeTypeOf(json)),
+    url: tokenUri.raw.trim(),
+    isArtwork: true
+  }
+
+  const used = new Set<string>([artwork.role])
+  const planned: PlannedAsset[] = [artwork]
+
+  for (const asset of listed) {
+    if (asset.url === artwork.url) continue
+    let role = asset.role
+    for (let n = 2; used.has(role); n++) role = `${asset.role}_${n}`
+    used.add(role)
+    planned.push({ role, url: asset.url })
+  }
+
+  return planned
+}
+
+/**
+ * Where the artwork goes in the token's folder, from its media type.
+ *
+ * Video, sound and 3D files go where an ERC-721 `animation_url` would, which is
+ * where the gallery looks for them. Everything else, and a missing type, is
+ * the image; the gallery reads the file's own first bytes to tell what it
+ * really is.
+ */
+function artworkRoleFor(mimeType: string | undefined): string {
+  const family = mimeType?.split('/')[0]
+  return family === 'video' || family === 'audio' || family === 'model' ? 'animation' : 'image'
+}
+
+/** The metadata's `mimeType`, when it is a well-formed media type. */
+function mimeTypeOf(json: Record<string, unknown> | undefined): string | undefined {
+  const value = json?.['mimeType']
+  if (typeof value !== 'string') return undefined
+  const type = value.trim().toLowerCase()
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(type) ? type : undefined
 }
 
 function ipfsTarget(root: CID, path: string): FetchTarget {
@@ -1528,6 +1685,52 @@ function readName(json: Record<string, unknown> | undefined, ref: TokenRef): str
     }
   }
   return `#${ref.tokenId}`
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprints the contract recorded at mint
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare a saved file with the SHA-256 its contract recorded at mint.
+ *
+ * Zora v1 Media writes both fingerprints when a token is minted and has no
+ * function that changes them, while the token's owner, or anyone they approve,
+ * can still point either link somewhere new. A match therefore shows this is
+ * the file that was minted. A mismatch means the link now leads to a different
+ * file. That file is still kept, because it is what the contract points at
+ * today, but the token is marked partly saved and the reason is given.
+ */
+function checkContractSha256(
+  token: ArchivedToken,
+  resource: FetchedResource,
+  recorded: string,
+  what: string,
+  where: { emit: Emit; phase: ProgressEvent['phase']; progress: number }
+): void {
+  const notes = resource.notes ?? []
+  resource.notes = notes
+
+  if (resource.sha256.toLowerCase() === recorded.toLowerCase()) {
+    notes.push(
+      `The contract recorded a SHA-256 fingerprint for the ${what} when the token was minted, and this ` +
+        'file matches it exactly, so it is the file that was minted.'
+    )
+    return
+  }
+
+  notes.push(
+    `The contract recorded a SHA-256 fingerprint for the ${what} when the token was minted ` +
+      `(${recorded}), and this file does not match it.`
+  )
+
+  const message =
+    `The ${what} saved for this token is not the file the contract recorded when the token was minted: ` +
+    "its SHA-256 fingerprint is different. The contract's link may have been changed since. The file has " +
+    'still been archived exactly as it was found.'
+  token.status = 'partial'
+  token.errors.push(message)
+  where.emit(where.phase, message, where.progress)
 }
 
 // ---------------------------------------------------------------------------
