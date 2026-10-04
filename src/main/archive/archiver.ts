@@ -1697,9 +1697,13 @@ function readName(json: Record<string, unknown> | undefined, ref: TokenRef): str
  * Zora v1 Media writes both fingerprints when a token is minted and has no
  * function that changes them, while the token's owner, or anyone they approve,
  * can still point either link somewhere new. A match therefore shows this is
- * the file that was minted. A mismatch means the link now leads to a different
- * file. That file is still kept, because it is what the contract points at
- * today, but the token is marked partly saved and the reason is given.
+ * the file that was minted. That holds even when the file had to come from an
+ * ordinary gateway and its original IPFS address could not be rebuilt, so the
+ * note says so. A mismatch means the link now leads to a different file, or,
+ * for a copy whose IPFS address could not be checked, that the gateway sent
+ * the wrong one. The file is still kept, because it is what the contract
+ * points at today, but the token is marked partly saved and the reason is
+ * given.
  */
 function checkContractSha256(
   token: ArchivedToken,
@@ -1714,7 +1718,11 @@ function checkContractSha256(
   if (resource.sha256.toLowerCase() === recorded.toLowerCase()) {
     notes.push(
       `The contract recorded a SHA-256 fingerprint for the ${what} when the token was minted, and this ` +
-        'file matches it exactly, so it is the file that was minted.'
+        'file matches it exactly, so it is the file that was minted.' +
+        (resource.cidPreserved
+          ? ''
+          : ' Its original IPFS address could not be rebuilt, but this fingerprint shows the bytes are ' +
+            'exactly the ones that were minted.')
     )
     return
   }
@@ -1724,10 +1732,13 @@ function checkContractSha256(
       `(${recorded}), and this file does not match it.`
   )
 
+  const cause = resource.cidPreserved
+    ? "The contract's link may have been changed since."
+    : "The contract's link may have been changed since, or the ordinary gateway this copy came from may " +
+      'have sent a different file, because its IPFS address could not be checked. Archiving it again may help.'
   const message =
     `The ${what} saved for this token is not the file the contract recorded when the token was minted: ` +
-    "its SHA-256 fingerprint is different. The contract's link may have been changed since. The file has " +
-    'still been archived exactly as it was found.'
+    `its SHA-256 fingerprint is different. ${cause} The file has still been archived exactly as it was found.`
   token.status = 'partial'
   token.errors.push(message)
   where.emit(where.phase, message, where.progress)

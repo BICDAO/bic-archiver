@@ -23,6 +23,8 @@ import { CarWriter } from '@ipld/car'
 import * as dagPb from '@ipld/dag-pb'
 import { exporter } from 'ipfs-unixfs-exporter'
 import { CID } from 'multiformats/cid'
+import * as raw from 'multiformats/codecs/raw'
+import { sha256 as sha256Hasher } from 'multiformats/hashes/sha2'
 import type { Blockstore } from 'interface-blockstore'
 
 import { archiveToken, buildArchiveRoot } from '../src/main/archive/archiver'
@@ -67,12 +69,14 @@ interface FakeNetwork {
  * Answers `eth_call` with `rpc(calldata)`, and `GET {gateway}/ipfs/{cid}?format=car` with a
  * CAR of every block under `cid` in `network`. A CID that is not in `network`, or that is
  * listed in `missing`, gets a 504 from every gateway, which is what content that has
- * fallen off IPFS looks like.
+ * fallen off IPFS looks like. A plain `GET {gateway}/ipfs/{cid}`, the ordinary download the
+ * archiver falls back to, is answered from `plain` and is otherwise a 504 too.
  */
 function fakeNetwork(
   rpc: (data: string) => RpcAnswer,
   network: Blockstore,
-  missing: ReadonlySet<string> = new Set()
+  missing: ReadonlySet<string> = new Set(),
+  plain: ReadonlyMap<string, Uint8Array> = new Map()
 ): FakeNetwork {
   const rpcCalls: string[] = []
 
@@ -102,8 +106,10 @@ function fakeNetwork(
     const parsed = new URL(url)
     const match = /^\/ipfs\/([^/]+)\/?$/.exec(parsed.pathname)
     const cidText = match?.[1]
-    if (cidText === undefined || parsed.searchParams.get('format') !== 'car') {
-      return new Response('', { status: 504 })
+    if (cidText === undefined) return new Response('', { status: 504 })
+    if (parsed.searchParams.get('format') !== 'car') {
+      const served = plain.get(cidText)
+      return served === undefined ? new Response('', { status: 504 }) : new Response(Buffer.from(served))
     }
 
     const cid = CID.parse(cidText)
@@ -384,6 +390,9 @@ describe('archiveToken — a Zora v1 Media token, whose metadata has a link of i
     expect(token.status).toBe('partial')
     expect(token.errors).toHaveLength(1)
     expect(token.errors[0]).toMatch(/image saved for this token is not the file the contract recorded/)
+    // The copy came with its IPFS address checked, so the gateway is not a suspect.
+    expect(token.assets['image']?.cidPreserved).toBe(true)
+    expect(token.errors[0]).not.toMatch(/gateway/)
     // Still kept: it is what the contract points at today.
     expect(token.assets['image']?.cid).toBe(artworkCid.toString())
     expect(token.assets['image']?.notes?.join(' ')).toContain(mintedHash)
@@ -424,6 +433,60 @@ describe('archiveToken — a Zora v1 Media token, whose metadata has a link of i
     expect(token.assets['image']?.cid).toBe(artworkCid.toString())
     expect(token.assets['image']?.notes?.join(' ')).toMatch(/matches it exactly/)
     expect(store.listTokens()).toHaveLength(1)
+  })
+
+  /*
+   * When no gateway will hand over the artwork in verifiable form, the archiver downloads it
+   * the ordinary way and tries to rebuild its IPFS address. The address below stands in for
+   * a file added with settings the archiver does not know, so the rebuild never matches.
+   */
+  async function unrebuildableArtwork(mintedSha256?: string): Promise<{ artwork: Uint8Array; store: ArchiveStore }> {
+    const network = memoryStore()
+    const metadata = zoraMetadata('Doge', 'image/png')
+    const artwork = pngLike(20_000)
+    const metadataCid = (await addBytes(metadata, network)).cid
+    const artworkCid = CID.createV1(raw.code, await sha256Hasher.digest(utf8('added with unknown settings')))
+
+    vi.stubGlobal(
+      'fetch',
+      fakeNetwork(
+        zoraContract({
+          tokenUri: `ipfs://${artworkCid.toString()}`,
+          metadataUri: `ipfs://${metadataCid.toString()}`,
+          contentSha256: mintedSha256 ?? sha256(artwork),
+          metadataSha256: sha256(metadata)
+        }),
+        network,
+        new Set(),
+        new Map([[artworkCid.toString(), artwork]])
+      ).fetch
+    )
+
+    return { artwork, store: await newArchive() }
+  }
+
+  it('says the bytes are the minted ones when the artwork could only be fetched unverified', async () => {
+    const { artwork, store } = await unrebuildableArtwork()
+    const token = await archiveToken(zoraRef('3366'), store, () => undefined)
+
+    expect(token.errors).toEqual([])
+    expect(token.status).toBe('ok')
+    expect(token.assets['image']?.cidPreserved).toBe(false)
+    expect(token.assets['image']?.sha256).toBe(sha256(artwork))
+    expect(token.assets['image']?.notes?.join(' ')).toMatch(
+      /matches it exactly.*could not be rebuilt, but this fingerprint shows the bytes are exactly the ones that were minted/
+    )
+  })
+
+  it('names the gateway as a possible cause when an unverified copy does not match the mint hash', async () => {
+    const { store } = await unrebuildableArtwork(sha256(utf8('the file that was actually minted')))
+    const token = await archiveToken(zoraRef('3366'), store, () => undefined)
+
+    expect(token.status).toBe('partial')
+    expect(token.assets['image']?.cidPreserved).toBe(false)
+    expect(token.errors).toHaveLength(1)
+    expect(token.errors[0]).toMatch(/image saved for this token is not the file the contract recorded/)
+    expect(token.errors[0]).toMatch(/ordinary gateway this copy came from may have sent a different file/)
   })
 })
 

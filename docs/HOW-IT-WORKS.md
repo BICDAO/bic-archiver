@@ -239,9 +239,13 @@ and saves the `tokenURI` file as `image`, or as `animation` when the metadata's
 `mimeType` is a video, sound or 3D type. It then compares each file with the hash the
 contract recorded. A file that does not match is still kept, because it is what the
 contract points at today, but the token is marked partly saved and the reason is
-given. The provenance record carries both links (`tokenUri`, `metadataUri`) and the
-recorded hashes (`contractSha256`). If the metadata file cannot be downloaded, the
-artwork is still archived, since it has an address of its own.
+given. The check also helps when a file had to come from an ordinary gateway and its
+original IPFS address could not be rebuilt (section 2): a match shows the bytes are
+the minted ones all the same, and a mismatch names that unchecked download as a
+possible cause. The provenance record carries both links (`tokenUri`,
+`metadataUri`) and the recorded hashes (`contractSha256`). If the metadata file
+cannot be downloaded, the artwork is still archived, since it has an address of its
+own.
 
 ---
 
