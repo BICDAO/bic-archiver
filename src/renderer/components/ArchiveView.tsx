@@ -9,7 +9,7 @@
 
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 
-import type { ArchivedToken, FetchedResource, TokenRef } from '../../shared/types'
+import type { ArchivedToken, FetchedResource, ResolvedTokenUri, TokenRef } from '../../shared/types'
 import type { ArchiveSnapshot } from '../../preload'
 import { Cid } from './Cid'
 import {
@@ -106,8 +106,8 @@ function previewUri(raw: string): string {
   return flat.length > 160 ? `${flat.slice(0, 150)}…` : flat
 }
 
-function describeUriKind(token: ArchivedToken): string {
-  switch (token.tokenUri.kind) {
+function describeUriKind(uri: ResolvedTokenUri): string {
+  switch (uri.kind) {
     case 'ipfs':
       return 'IPFS'
     case 'arweave':
@@ -422,6 +422,10 @@ function TokenDetail({
   files: NamedResource[]
   explain: string
 }): ReactNode {
+  // A Zora v1 token keeps its description at a second link, and its token URI
+  // is the artwork itself.
+  const descriptionUri = token.metadataUri ?? token.tokenUri
+
   return (
     <div className="stack">
       <dl className="kv small">
@@ -431,13 +435,28 @@ function TokenDetail({
         </dd>
         <dt>Description came from</dt>
         <dd>
-          {describeUriKind(token)}
-          {token.tokenUri.onchain && ' — stored entirely on-chain, so it cannot disappear'}
+          {describeUriKind(descriptionUri)}
+          {descriptionUri.onchain && ' — stored entirely on-chain, so it cannot disappear'}
         </dd>
-        <dt>Contract points at</dt>
-        <dd className="input-mono" style={{ overflowWrap: 'anywhere' }}>
-          {previewUri(token.tokenUri.raw)}
-        </dd>
+        {token.metadataUri === undefined ? (
+          <>
+            <dt>Contract points at</dt>
+            <dd className="input-mono" style={{ overflowWrap: 'anywhere' }}>
+              {previewUri(token.tokenUri.raw)}
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>Description link</dt>
+            <dd className="input-mono" style={{ overflowWrap: 'anywhere' }}>
+              {previewUri(token.metadataUri.raw)}
+            </dd>
+            <dt>Artwork link</dt>
+            <dd className="input-mono" style={{ overflowWrap: 'anywhere' }}>
+              {previewUri(token.tokenUri.raw)}
+            </dd>
+          </>
+        )}
         <dt>Archived</dt>
         <dd>{formatWhen(token.archivedAt)}</dd>
       </dl>

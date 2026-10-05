@@ -87,6 +87,20 @@ export interface ArchivedToken {
   /** Filesystem/IPFS-safe folder name derived from `name`. */
   folderName: string
   tokenUri: ResolvedTokenUri
+  /**
+   * The token's separate metadata link, for a contract that keeps the metadata
+   * apart from the artwork. Zora's original (v1) Media contract is the case
+   * this exists for: there `tokenUri` is the artwork itself and this is what
+   * `tokenMetadataURI(id)` returned. Absent for every other contract, where
+   * `tokenUri` is the metadata.
+   */
+  metadataUri?: ResolvedTokenUri
+  /**
+   * SHA-256 fingerprints the contract itself recorded when the token was
+   * minted, as lowercase hex without `0x` (Zora v1's `tokenContentHashes` and
+   * `tokenMetadataHashes`). Absent when the contract records none.
+   */
+  contractSha256?: { content?: string; metadata?: string }
   metadata?: FetchedResource
   /** Parsed metadata JSON, for display and asset discovery. */
   metadataJson?: Record<string, unknown>

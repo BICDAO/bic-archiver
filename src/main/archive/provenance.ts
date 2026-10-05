@@ -23,7 +23,7 @@
  */
 
 import { LAYOUT } from '../../shared/constants.js'
-import type { ArchivedToken, FetchedResource } from '../../shared/types.js'
+import type { ArchivedToken, FetchedResource, ResolvedTokenUri } from '../../shared/types.js'
 import { sanitizeFolderName } from './inputs.js'
 
 /** Identifies the shape of this record, for whoever reads it in ten years. */
@@ -254,27 +254,7 @@ export function buildProvenance(token: ArchivedToken): Record<string, unknown> {
   const gateways = [...new Set(items.map((item) => item.gateway).filter((g): g is string => g !== null))].sort()
   const unpreserved = items.filter((item) => item.matchesOriginalCid === false).map((item) => item.path)
 
-  const rawTokenUri = describeRawTokenUri(token.tokenUri.raw ?? '')
-
-  const tokenUri: Record<string, unknown> = {
-    /** Exactly what `tokenURI(id)` / `uri(id)` returned, before any tidying. */
-    raw: rawTokenUri.value,
-    rawWasShortened: rawTokenUri.shortened,
-    rawLength: rawTokenUri.length,
-    kind: token.tokenUri.kind,
-    storedOnChain: token.tokenUri.onchain
-  }
-  if (token.tokenUri.normalizedUrl !== undefined) {
-    tokenUri.normalizedUrl = token.tokenUri.normalizedUrl
-  }
-  if (token.tokenUri.ipfsPath !== undefined) {
-    tokenUri.ipfs = {
-      cid: token.tokenUri.ipfsPath.cid,
-      path: token.tokenUri.ipfsPath.path
-    }
-  }
-
-  return {
+  const record: Record<string, unknown> = {
     schema: SCHEMA,
     generatedBy: 'BIC Archiver',
     archivedAt: token.archivedAt,
@@ -289,7 +269,37 @@ export function buildProvenance(token: ArchivedToken): Record<string, unknown> {
       preferredFolderName: token.folderName
     },
 
-    tokenUri,
+    /** Exactly what `tokenURI(id)` / `uri(id)` returned, before any tidying. */
+    tokenUri: describeUri(token.tokenUri)
+  }
+
+  // Only a contract that keeps the metadata apart from the artwork (Zora v1
+  // Media) adds these. Every other token's record keeps exactly the keys it
+  // always had, so rebuilding an older folder still gives the same CID.
+  if (token.metadataUri !== undefined) {
+    /** Exactly what `tokenMetadataURI(id)` returned. */
+    record.metadataUri = describeUri(token.metadataUri)
+  }
+  if (token.contractSha256 !== undefined) {
+    const recorded: Record<string, string> = {}
+    if (token.contractSha256.content !== undefined) recorded.content = token.contractSha256.content
+    if (token.contractSha256.metadata !== undefined) recorded.metadata = token.contractSha256.metadata
+    record.contractSha256 = recorded
+  }
+
+  const separateLinks =
+    token.metadataUri === undefined
+      ? []
+      : [
+          'This token\'s contract keeps two links. "tokenUri" is the artwork itself, listed under "assets", ' +
+            'and "metadataUri" is the token information, listed under "metadata".',
+          'Where "contractSha256" is present, the contract recorded those SHA-256 fingerprints when the ' +
+            'token was minted: "content" for the artwork and "metadata" for the token information. Compare ' +
+            'each with the "sha256" of that file here; the "notes" for each file say whether it matched.'
+        ]
+
+  return {
+    ...record,
 
     metadata: token.metadata === undefined ? null : itemFor('metadata', token.metadata),
     assets: Object.fromEntries(
@@ -327,7 +337,31 @@ export function buildProvenance(token: ArchivedToken): Record<string, unknown> {
       'Where "matchesOriginalCid" is null, the file never had an IPFS address to match — it came from an ' +
         'ordinary web address, from Arweave, or directly from the Ethereum blockchain.',
       'This record does not include a hash of itself. Its own IPFS address is recorded in the folder that ' +
-        'contains it.'
+        'contains it.',
+      ...separateLinks
     ]
   }
+}
+
+/** A link as the contract gave it, plus how the app read it. */
+function describeUri(uri: ResolvedTokenUri): Record<string, unknown> {
+  const raw = describeRawTokenUri(uri.raw ?? '')
+
+  const described: Record<string, unknown> = {
+    raw: raw.value,
+    rawWasShortened: raw.shortened,
+    rawLength: raw.length,
+    kind: uri.kind,
+    storedOnChain: uri.onchain
+  }
+  if (uri.normalizedUrl !== undefined) {
+    described.normalizedUrl = uri.normalizedUrl
+  }
+  if (uri.ipfsPath !== undefined) {
+    described.ipfs = {
+      cid: uri.ipfsPath.cid,
+      path: uri.ipfsPath.path
+    }
+  }
+  return described
 }

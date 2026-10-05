@@ -47,6 +47,7 @@ now unreachable and nobody noticed until someone went looking.
 | Install IPFS Desktop, wait for the daemon | Nothing, to *archive* — the app speaks the gateway HTTP protocols directly and keeps blocks in its own on-disk blockstore. To *serve*, the app installs and supervises Kubo itself | `src/main/ipfs/blockstore.ts`, `src/main/node/` |
 | Open Etherscan, find the contract, click **Read as Proxy** | `eth_call` over public JSON-RPC; proxies are transparent to the EVM, so there is no proxy step | `src/main/chain/rpc.ts` |
 | Call `tokenURI(id)` / `uri(id)` and copy the result | `resolveTokenUri()`, hand-rolled ABI encode/decode, ERC-721 then ERC-1155 | `src/main/chain/tokenUri.ts` |
+| Know that on Zora's original (v1) Media contract `tokenURI` is the picture, and the metadata is somewhere else | `resolveTokenMetadataUri()` asks every ERC-721 for `tokenMetadataURI(id)` too. When it answers, the metadata comes from there, the `tokenURI` file is saved as the image or animation by the metadata's `mimeType`, and both files are checked against the SHA-256 hashes the contract recorded at mint | `src/main/chain/tokenUri.ts`, `src/main/archive/archiver.ts` |
 | Paste a base64 `data:` blob into an online decoder | Decoded in-process, base64 **and** plain-percent-encoded `data:` URIs | `src/main/chain/tokenUri.ts` |
 | Read `image` / `animation_url` out of the JSON by eye | `extractAssetUrls()` walks the metadata for every media field | `src/main/archive/inputs.ts` |
 | Paste each CID into *Import from IPFS* | Trustless CAR retrieval — every block re-hashed locally before it is kept | `src/main/ipfs/trustlessFetch.ts` |
@@ -146,7 +147,7 @@ is dropping `type` from `import type { … } from '../preload'`.
 | `src/shared/types.ts` | The fixed contract between engine and GUI. Change it and both sides must change. |
 | `src/shared/constants.ts` | Endpoints, ABI selectors, timeouts, archive layout names. Every endpoint was reachability-tested; each list is an ordered set of candidates, never a single point of failure. |
 | `src/main/chain/rpc.ts` | `ethCall`, `decodeAbiString`. Hand-rolled JSON-RPC over `fetch`, no viem/ethers. Falls through four public endpoints. Distinguishes *unreachable* from *reverted*. |
-| `src/main/chain/tokenUri.ts` | `resolveTokenUri`, `detectStandard`, `parseIpfsUri`, `encodeUint256`. ERC-721 → ERC-1155 → `data:` decode. |
+| `src/main/chain/tokenUri.ts` | `resolveTokenUri`, `resolveTokenMetadataUri`, `detectStandard`, `parseIpfsUri`, `encodeUint256`. ERC-721 → ERC-1155 → `data:` decode, plus Zora v1's separate metadata link and mint-time hashes. |
 | `src/main/ipfs/trustlessFetch.ts` | `fetchCar`, `fetchDag`, `resolvePath`, `verifyBlock`, `fetchHttpBytes`, `fetchIpfsBytesFallback`. The module that makes the manual ritual obsolete. |
 | `src/main/ipfs/blockstore.ts` | `blockstore-fs` wrapper — open/close/get/put/has. |
 | `src/main/ipfs/importer.ts` | `addBytes`, `reconstructCid`, `RECONSTRUCTION_MATRIX`, `sha256Hex`, `addDirectoryFromFs`. Every importer knob pinned so a library update cannot silently change our CIDs. |

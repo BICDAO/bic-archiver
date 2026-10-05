@@ -11,7 +11,14 @@
 
 import { Buffer } from 'node:buffer'
 import { CID } from 'multiformats/cid'
-import { ARWEAVE_GATEWAYS, SELECTOR_TOKEN_URI, SELECTOR_URI } from '../../shared/constants'
+import {
+  ARWEAVE_GATEWAYS,
+  SELECTOR_TOKEN_CONTENT_HASHES,
+  SELECTOR_TOKEN_METADATA_HASHES,
+  SELECTOR_TOKEN_METADATA_URI,
+  SELECTOR_TOKEN_URI,
+  SELECTOR_URI
+} from '../../shared/constants'
 import type { IpfsPath, ResolvedTokenUri, TokenRef, TokenStandard } from '../../shared/types'
 import { decodeAbiString, ethCall } from './rpc'
 
@@ -188,6 +195,74 @@ export async function resolveTokenUri(ref: TokenRef): Promise<ResolvedTokenUri> 
   throw new Error(
     `We reached Ethereum, but the collection at ${contract} wouldn't give us a link to token ${ref.tokenId}'s information. Most often this means that token number isn't part of this collection, or the address isn't an NFT collection at all. (What we tried: ${problems.join('; and ')}.)`
   )
+}
+
+/** What a contract that keeps a token's metadata apart from its artwork says. */
+export interface TokenMetadataLink {
+  /** What `tokenMetadataURI(id)` returned, classified the same way as a token URI. */
+  metadataUri: ResolvedTokenUri
+  /** The artwork's SHA-256 as recorded at mint, lowercase hex without `0x`. */
+  contentSha256?: string
+  /** The metadata file's SHA-256 as recorded at mint, lowercase hex without `0x`. */
+  metadataSha256?: string
+}
+
+/**
+ * Asks the contract for a separate metadata link: `tokenMetadataURI(id)`.
+ *
+ * Zora's original (v1) Media contract stores two links per token. Its
+ * `tokenURI` is the artwork file itself, and the metadata (name,
+ * description, mimeType) sits at `tokenMetadataURI`. It also records the
+ * SHA-256 of both files when the token is minted, readable from
+ * `tokenContentHashes(id)` and `tokenMetadataHashes(id)`; those are read too
+ * when the contract has them.
+ *
+ * Best effort, and never throws. Almost every contract refuses this call, and
+ * `undefined` then means "carry on as before": `tokenURI` is the metadata. The
+ * same goes for an empty answer, an unreadable one, or a link of a kind this
+ * app can't open.
+ */
+export async function resolveTokenMetadataUri(ref: TokenRef): Promise<TokenMetadataLink | undefined> {
+  if (!ref || typeof ref.contract !== 'string' || !ADDRESS_RE.test(ref.contract.trim())) {
+    return undefined
+  }
+  const chainId = ref.chainId ?? 1
+  if (chainId !== 1) return undefined
+  const contract = ref.contract.trim()
+
+  let tokenWord: string
+  try {
+    tokenWord = encodeUint256(ref.tokenId)
+  } catch {
+    return undefined
+  }
+
+  let raw: string
+  try {
+    raw = decodeAbiString(await ethCall(contract, SELECTOR_TOKEN_METADATA_URI + tokenWord, { chainId }))
+  } catch {
+    return undefined
+  }
+
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+
+  let metadataUri: ResolvedTokenUri
+  try {
+    metadataUri = classifyUri(raw, trimmed)
+  } catch {
+    return undefined
+  }
+
+  const link: TokenMetadataLink = { metadataUri }
+
+  const contentSha256 = await readSha256(contract, SELECTOR_TOKEN_CONTENT_HASHES + tokenWord, chainId)
+  if (contentSha256 !== undefined) link.contentSha256 = contentSha256
+
+  const metadataSha256 = await readSha256(contract, SELECTOR_TOKEN_METADATA_HASHES + tokenWord, chainId)
+  if (metadataSha256 !== undefined) link.metadataSha256 = metadataSha256
+
+  return link
 }
 
 /**
@@ -397,6 +472,28 @@ function decodeAbiBool(hex: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Reads one `bytes32` holding a SHA-256, as lowercase hex without `0x`.
+ *
+ * `undefined` when the call fails, the answer is too short to be a `bytes32`,
+ * or the value is all zeros, which is what an unset mapping entry returns.
+ */
+async function readSha256(contract: string, data: string, chainId: number): Promise<string | undefined> {
+  let hex: string
+  try {
+    hex = await ethCall(contract, data, { chainId })
+  } catch {
+    return undefined
+  }
+
+  let body = hex.trim()
+  if (body.startsWith('0x') || body.startsWith('0X')) body = body.slice(2)
+  if (body.length < 64 || !/^[0-9a-fA-F]+$/.test(body)) return undefined
+
+  const word = body.slice(0, 64).toLowerCase()
+  return /^0+$/.test(word) ? undefined : word
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

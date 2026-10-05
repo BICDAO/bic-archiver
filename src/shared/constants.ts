@@ -58,6 +58,22 @@ export const SELECTOR_URI = '0x0e89341c'
 /** ERC-721 `name()`. */
 export const SELECTOR_NAME = '0x06fdde03'
 
+/*
+ * Zora's original (v1) Media contract, 0xabefbc9fd2f806065b4f3c237d4b59d9a97bcac7,
+ * keeps two links per token. `tokenURI` is the artwork itself; the metadata
+ * (name, description, mimeType) is at `tokenMetadataURI`. It also records the
+ * SHA-256 of both files at mint. Each selector below is the first four bytes of
+ * the keccak-256 of its signature, and each was checked with a live `eth_call`
+ * for token 3366 on 2026-10-04.
+ */
+
+/** Zora v1 Media `tokenMetadataURI(uint256)` → string. */
+export const SELECTOR_TOKEN_METADATA_URI = '0x157c3df9'
+/** Zora v1 Media `tokenContentHashes(uint256)` → bytes32, the artwork's SHA-256. */
+export const SELECTOR_TOKEN_CONTENT_HASHES = '0xfad32197'
+/** Zora v1 Media `tokenMetadataHashes(uint256)` → bytes32, the metadata's SHA-256. */
+export const SELECTOR_TOKEN_METADATA_HASHES = '0x01ddc3b5'
+
 /** Per-request network timeout, milliseconds. */
 export const FETCH_TIMEOUT_MS = 60_000
 /** Timeout for a whole trustless CAR retrieval, milliseconds. */
